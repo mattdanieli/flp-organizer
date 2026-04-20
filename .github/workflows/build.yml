@@ -1,0 +1,42 @@
+name: Build Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --noconsole --name FLPOrganizer `
+            --hidden-import tkinterdnd2 `
+            --paths src src/flp_gui.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FLPOrganizer-windows
+          path: dist/FLPOrganizer.exe
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/FLPOrganizer.exe
+          generate_release_notes: true
