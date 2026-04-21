@@ -2,36 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.1.1] - 2026-04-21
-
-### Fixed
-- Fixed crash on startup on Windows (`TypeError: 'list' object is not callable`
-  caused by `Canvas.create_arc` inside custom widgets). Replaced the arc-based
-  rounded-corner rendering with an `create_oval` based approach that is
-  compatible across all Tcl/Tk versions bundled by PyInstaller.
-- Dashed border corners on the drop zone are now drawn as short line segments,
-  for the same reason.
-
-## [1.1.0] - 2026-04-20
+## [1.1.0] - 2026-04-21
 
 ### Added
 - **Two sorting modes selectable from the GUI:**
-  - **Alphabetical (A–Z)** — groups ordered by name, case-insensitive (original default).
+  - **Alphabetical (A–Z)** — groups ordered by name, case-insensitive.
   - **By first appearance** — groups ordered by the earliest time any of their
-    clips plays. Elements that enter first (kick, bass) end up on top; build-ups,
-    fills, and outros go further down. Perfect for reading the arrangement
-    top-to-bottom like a timeline.
-- GUI redesign with FL Studio-inspired dark theme and orange accents.
-- Rounded corners, hover animations, gradient highlights on the accent button.
-- Sliding segmented toggle for sort mode selection, with an explanation of what
-  each mode does below it.
+    clips plays. Elements that enter first (kick, bass) end up on top;
+    build-ups, fills, and outros go further down. Good for reading the
+    arrangement top-to-bottom like a timeline.
+- Sort mode radio toggle in the GUI with a caption that explains what each
+  mode does.
 - Switching sort mode re-computes the plan instantly without reloading the file.
-- CLI now accepts `--sort alpha` or `--sort first`.
+- CLI accepts `--sort alpha` or `--sort first`.
 
 ### Changed
-- GUI font and spacing refined for a more modern look.
+- GUI restyled with a dark FL-Studio-inspired theme and orange accents.
 - Alternating row colors in the preview table for better readability.
 - Track numbers displayed as `#N` / `#N–M` for clarity.
+- Uses only standard ttk widgets to guarantee compatibility across Windows,
+  macOS, and Linux, without custom Canvas rendering that caused startup issues
+  on some Windows setups.
 
 ## [1.0.0] - 2026-04-20
 
