@@ -1,9 +1,9 @@
 """
-FLP Organizer - GUI
-===================
+FLP Organizer - Modern GUI (v1.1)
+=================================
 
-Tkinter-based GUI. Drag and drop an .flp file, preview the grouping plan,
-then apply. Zero external dependencies beyond standard Python and tkinterdnd2.
+FL-Studio-inspired dark theme with energetic orange accents.
+Rounded corners, gradient touches, subtle hover animations.
 """
 from __future__ import annotations
 import os
@@ -24,167 +24,459 @@ import flp_core
 
 
 APP_NAME = "FLP Organizer"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
-# ----- Color palette (dark theme, FL Studio vibes) -----
-BG         = "#1e1e22"
-BG_ALT     = "#26262b"
-BG_PANEL   = "#2c2c33"
-FG         = "#e8e8ea"
-FG_DIM     = "#9a9aa2"
-ACCENT     = "#ff7a00"
-ACCENT_FG  = "#ffffff"
-BORDER     = "#3a3a42"
-OK_GREEN   = "#4caf50"
-WARN_AMBER = "#ffb300"
+# --- FL Studio-inspired palette ------------------------------------------------
+BG              = "#141416"
+BG_PANEL        = "#1c1c1f"
+BG_PANEL_HOVER  = "#232327"
+BG_INSET        = "#0f0f11"
+BG_ROW          = "#1a1a1d"
+BG_ROW_ALT      = "#1e1e21"
+BORDER          = "#2a2a2f"
+BORDER_STRONG   = "#3a3a41"
+
+FG              = "#f0f0f2"
+FG_DIM          = "#9a9aa2"
+FG_MUTED        = "#5f5f66"
+
+ACCENT          = "#ff7a00"
+ACCENT_HOVER    = "#ff9124"
+ACCENT_PRESSED  = "#e66a00"
+ACCENT_FG       = "#1a1a1d"
+
+OK_GREEN        = "#4ade80"
+WARN_AMBER      = "#fbbf24"
+ERROR_RED       = "#f87171"
+
+SELECTION_BG    = "#2a1f0f"
+SELECTION_FG    = "#ffb366"
+
+
+def _lighten(hex_color: str, amount: float = 0.1) -> str:
+    hc = hex_color.lstrip("#")
+    r, g, b = int(hc[0:2], 16), int(hc[2:4], 16), int(hc[4:6], 16)
+    r = min(255, int(r + (255 - r) * amount))
+    g = min(255, int(g + (255 - g) * amount))
+    b = min(255, int(b + (255 - b) * amount))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _darken(hex_color: str, amount: float = 0.15) -> str:
+    hc = hex_color.lstrip("#")
+    r, g, b = int(hc[0:2], 16), int(hc[2:4], 16), int(hc[4:6], 16)
+    r = max(0, int(r * (1 - amount)))
+    g = max(0, int(g * (1 - amount)))
+    b = max(0, int(b * (1 - amount)))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _rounded_on(canvas, x1, y1, x2, y2, r, fill, outline=""):
+    canvas.create_arc(x1, y1, x1 + 2*r, y1 + 2*r, start=90, extent=90,
+                      fill=fill, outline=outline)
+    canvas.create_arc(x2 - 2*r, y1, x2, y1 + 2*r, start=0, extent=90,
+                      fill=fill, outline=outline)
+    canvas.create_arc(x1, y2 - 2*r, x1 + 2*r, y2, start=180, extent=90,
+                      fill=fill, outline=outline)
+    canvas.create_arc(x2 - 2*r, y2 - 2*r, x2, y2, start=270, extent=90,
+                      fill=fill, outline=outline)
+    canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline=outline)
+    canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline=outline)
+
+
+class RoundedButton(tk.Canvas):
+    """Rounded canvas button with hover/pressed animation."""
+
+    def __init__(self, parent, text="", command=None, style="accent",
+                 width=160, height=40, radius=12, font=None, **kwargs):
+        bg_parent = kwargs.pop("bg", BG_PANEL)
+        super().__init__(parent, width=width, height=height,
+                         bg=bg_parent, highlightthickness=0, bd=0, **kwargs)
+        self._command = command
+        self._text = text
+        self._width = width
+        self._height = height
+        self._radius = radius
+        self._font = font or ("Segoe UI", 10, "bold")
+        self._state = "normal"
+        self._style = style
+        self._colors = self._style_colors(style)
+
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Configure>", lambda e: self._redraw())
+        self._redraw()
+
+    def _style_colors(self, style):
+        if style == "accent":
+            return {"normal":   (ACCENT,         ACCENT_FG),
+                    "hover":    (ACCENT_HOVER,   ACCENT_FG),
+                    "pressed":  (ACCENT_PRESSED, ACCENT_FG),
+                    "disabled": ("#3a2a1a",      "#7a6a5a")}
+        if style == "secondary":
+            return {"normal":   (BG_PANEL,       FG),
+                    "hover":    (BG_PANEL_HOVER, FG),
+                    "pressed":  (BG_INSET,       FG),
+                    "disabled": (BG_PANEL,       FG_MUTED)}
+        return {"normal":   (BG, FG_DIM),
+                "hover":    (BG_PANEL, FG),
+                "pressed":  (BG_INSET, FG_DIM),
+                "disabled": (BG, FG_MUTED)}
+
+    def configure_state(self, enabled: bool) -> None:
+        self._state = "normal" if enabled else "disabled"
+        self._redraw()
+
+    def _redraw(self):
+        self.delete("all")
+        w = self.winfo_width() or self._width
+        h = self.winfo_height() or self._height
+        bg_col, fg_col = self._colors[self._state]
+        r = min(self._radius, h // 2, w // 2)
+
+        if self._style == "accent" and self._state in ("normal", "hover"):
+            glow = _lighten(bg_col, 0.22 if self._state == "hover" else 0.14)
+            _rounded_on(self, 1, 1, w - 1, h - 1, r, fill=bg_col)
+            _rounded_on(self, 2, 2, w - 2, h // 2 + 2, r, fill=glow)
+            self.create_rectangle(2 + r, h // 2 + 1, w - 2 - r, h // 2 + 2,
+                                  fill=bg_col, outline="")
+            self.create_rectangle(1, h // 2 + 2, w - 1, h - 1,
+                                  fill=bg_col, outline="")
+            # redraw bottom rounded corners of the base color
+            self.create_arc(1, h - 1 - 2*r, 1 + 2*r, h - 1, start=180, extent=90,
+                            fill=bg_col, outline="")
+            self.create_arc(w - 1 - 2*r, h - 1 - 2*r, w - 1, h - 1, start=270, extent=90,
+                            fill=bg_col, outline="")
+        else:
+            _rounded_on(self, 1, 1, w - 1, h - 1, r, fill=bg_col)
+
+        self.create_text(w // 2, h // 2, text=self._text, fill=fg_col, font=self._font)
+        try:
+            self.configure(cursor="hand2" if self._state != "disabled" else "arrow")
+        except tk.TclError:
+            pass
+
+    def _on_enter(self, _e):
+        if self._state in ("disabled", "pressed"): return
+        self._state = "hover"; self._redraw()
+
+    def _on_leave(self, _e):
+        if self._state == "disabled": return
+        self._state = "normal"; self._redraw()
+
+    def _on_press(self, _e):
+        if self._state == "disabled": return
+        self._state = "pressed"; self._redraw()
+
+    def _on_release(self, e):
+        if self._state == "disabled": return
+        was_pressed = self._state == "pressed"
+        if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height():
+            self._state = "hover"
+        else:
+            self._state = "normal"
+        self._redraw()
+        if was_pressed and self._command:
+            self._command()
+
+
+class SortModeToggle(tk.Canvas):
+    """Two-option segmented pill with a sliding orange indicator."""
+
+    def __init__(self, parent, options, initial=0, on_change=None,
+                 height=40, **kwargs):
+        bg_parent = kwargs.pop("bg", BG_PANEL)
+        super().__init__(parent, height=height, bg=bg_parent,
+                         highlightthickness=0, bd=0, **kwargs)
+        self._options = options
+        self._index = initial
+        self._on_change = on_change
+        self._height = height
+        self.bind("<Configure>", lambda e: self._redraw())
+        self.bind("<Button-1>", self._on_click)
+        self._redraw()
+
+    def _redraw(self):
+        self.delete("all")
+        w = self.winfo_width() or 400
+        h = self.winfo_height() or self._height
+        r = h // 2
+        _rounded_on(self, 1, 1, w - 1, h - 1, r, fill=BG_INSET)
+
+        seg_w = (w - 8) / len(self._options)
+        x0 = int(4 + self._index * seg_w)
+        x1 = int(x0 + seg_w)
+        ir = r - 3
+        _rounded_on(self, x0, 4, x1, h - 4, ir, fill=ACCENT)
+        glow = _lighten(ACCENT, 0.22)
+        _rounded_on(self, x0 + 1, 5, x1 - 1, h // 2 + 2, ir, fill=glow)
+        self.create_rectangle(x0 + ir, h // 2, x1 - ir, h - 4, fill=ACCENT, outline="")
+
+        for i, label in enumerate(self._options):
+            cx = int(4 + seg_w * i + seg_w / 2)
+            if i == self._index:
+                self.create_text(cx, h // 2, text=label, fill=ACCENT_FG,
+                                 font=("Segoe UI", 9, "bold"))
+            else:
+                self.create_text(cx, h // 2, text=label, fill=FG_DIM,
+                                 font=("Segoe UI", 9))
+        self.configure(cursor="hand2")
+
+    def _on_click(self, e):
+        w = self.winfo_width() or 400
+        seg_w = (w - 8) / len(self._options)
+        idx = int(max(0, min(len(self._options) - 1, (e.x - 4) // seg_w)))
+        if idx != self._index:
+            self._index = idx
+            self._redraw()
+            if self._on_change:
+                self._on_change(self._index)
+
+    def get(self) -> int:
+        return self._index
+
+
+class DropZone(tk.Canvas):
+    """Dashed rounded drop area with hover state."""
+
+    def __init__(self, parent, on_click=None, height=130, **kwargs):
+        bg_parent = kwargs.pop("bg", BG)
+        super().__init__(parent, height=height, bg=bg_parent,
+                         highlightthickness=0, bd=0, **kwargs)
+        self._hover = False
+        self._on_click = on_click
+        self._text_main = "Drop your .flp file here"
+        self._text_sub = "or click to browse"
+        self.bind("<Configure>", lambda e: self._redraw())
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", lambda e: self._on_click() if self._on_click else None)
+        self._redraw()
+
+    def set_text(self, main: str, sub: str = "") -> None:
+        self._text_main = main
+        self._text_sub = sub
+        self._redraw()
+
+    def _on_enter(self, _e): self._hover = True; self._redraw()
+    def _on_leave(self, _e): self._hover = False; self._redraw()
+
+    def _redraw(self):
+        self.delete("all")
+        w = self.winfo_width() or 600
+        h = self.winfo_height() or 130
+        r = 16
+        fill = BG_PANEL_HOVER if self._hover else BG_PANEL
+        _rounded_on(self, 2, 2, w - 2, h - 2, r, fill=fill)
+        border_col = ACCENT if self._hover else BORDER_STRONG
+        self._dashed_border(2, 2, w - 2, h - 2, r, border_col)
+
+        icon_y = h // 2 - 16
+        icon_x = w // 2
+        col = ACCENT if self._hover else FG_DIM
+        self._upload_icon(icon_x, icon_y, col)
+
+        self.create_text(w // 2, h // 2 + 18, text=self._text_main,
+                         fill=FG if self._hover else FG_DIM,
+                         font=("Segoe UI", 11, "bold"))
+        if self._text_sub:
+            self.create_text(w // 2, h // 2 + 40, text=self._text_sub,
+                             fill=FG_MUTED, font=("Segoe UI", 9))
+        self.configure(cursor="hand2")
+
+    def _dashed_border(self, x1, y1, x2, y2, r, color):
+        dash, gap = 6, 4
+        def hdashes(y):
+            x = x1 + r
+            while x < x2 - r:
+                self.create_line(x, y, min(x + dash, x2 - r), y, fill=color, width=2)
+                x += dash + gap
+        def vdashes(x):
+            y = y1 + r
+            while y < y2 - r:
+                self.create_line(x, y, x, min(y + dash, y2 - r), fill=color, width=2)
+                y += dash + gap
+        hdashes(y1); hdashes(y2)
+        vdashes(x1); vdashes(x2)
+        for (ax, ay, start) in [(x1, y1, 90), (x2 - 2*r, y1, 0),
+                                 (x1, y2 - 2*r, 180), (x2 - 2*r, y2 - 2*r, 270)]:
+            self.create_arc(ax, ay, ax + 2*r, ay + 2*r, start=start, extent=90,
+                            style="arc", outline=color, width=2)
+
+    def _upload_icon(self, cx, cy, color):
+        self.create_polygon(cx, cy - 12, cx - 8, cy - 4, cx + 8, cy - 4,
+                            fill=color, outline="")
+        self.create_rectangle(cx - 3, cy - 6, cx + 3, cy + 6,
+                              fill=color, outline="")
+        self.create_rectangle(cx - 12, cy + 8, cx + 12, cy + 10,
+                              fill=color, outline="")
 
 
 class FlpOrganizerApp:
     def __init__(self, root) -> None:
         self.root = root
-        self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry("760x640")
-        self.root.minsize(640, 520)
+        self.root.title(APP_NAME)
+        self.root.geometry("880x720")
+        self.root.minsize(720, 600)
         self.root.configure(bg=BG)
 
         self.current_path: Path | None = None
         self.current_result: flp_core.AnalysisResult | None = None
+        self.sort_mode_idx = 0
 
-        self._setup_style()
+        self._setup_ttk_style()
         self._build_ui()
 
         if DND_AVAILABLE:
             self.drop_zone.drop_target_register(DND_FILES)
             self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
 
-    # ---------- UI setup ----------
-    def _setup_style(self) -> None:
+    def _setup_ttk_style(self) -> None:
         style = ttk.Style()
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-
-        style.configure("TFrame", background=BG)
-        style.configure("Panel.TFrame", background=BG_PANEL)
-        style.configure("TLabel", background=BG, foreground=FG, font=("Segoe UI", 10))
-        style.configure("Title.TLabel", background=BG, foreground=FG,
-                        font=("Segoe UI", 16, "bold"))
-        style.configure("Subtitle.TLabel", background=BG, foreground=FG_DIM,
-                        font=("Segoe UI", 9))
-        style.configure("Panel.TLabel", background=BG_PANEL, foreground=FG,
-                        font=("Segoe UI", 10))
-        style.configure("PanelDim.TLabel", background=BG_PANEL, foreground=FG_DIM,
-                        font=("Segoe UI", 9))
-
-        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"),
-                        background=ACCENT, foreground=ACCENT_FG,
-                        borderwidth=0, focusthickness=0, padding=(16, 8))
-        style.map("Accent.TButton",
-                  background=[("active", "#ff9124"), ("disabled", "#555")],
-                  foreground=[("disabled", "#aaa")])
-
-        style.configure("Secondary.TButton", font=("Segoe UI", 10),
-                        background=BG_PANEL, foreground=FG,
-                        borderwidth=1, focusthickness=0, padding=(12, 6))
-        style.map("Secondary.TButton",
-                  background=[("active", BG_ALT)])
-
-        style.configure("Treeview", background=BG_ALT, foreground=FG,
-                        fieldbackground=BG_ALT, borderwidth=0,
-                        font=("Segoe UI", 9), rowheight=22)
-        style.configure("Treeview.Heading", background=BG_PANEL, foreground=FG,
-                        font=("Segoe UI", 9, "bold"), borderwidth=0, relief="flat")
-        style.map("Treeview",
-                  background=[("selected", ACCENT)],
-                  foreground=[("selected", ACCENT_FG)])
-
-        style.configure("TProgressbar", troughcolor=BG_PANEL, background=ACCENT,
-                        borderwidth=0, thickness=6)
+        style.configure("Modern.Treeview",
+                        background=BG_ROW, foreground=FG,
+                        fieldbackground=BG_ROW, borderwidth=0,
+                        font=("Segoe UI", 9), rowheight=26)
+        style.configure("Modern.Treeview.Heading",
+                        background=BG_INSET, foreground=FG_DIM,
+                        font=("Segoe UI", 9, "bold"),
+                        borderwidth=0, relief="flat", padding=(10, 8))
+        style.map("Modern.Treeview",
+                  background=[("selected", SELECTION_BG)],
+                  foreground=[("selected", SELECTION_FG)])
+        style.configure("Accent.Horizontal.TProgressbar",
+                        troughcolor=BG_INSET, background=ACCENT,
+                        borderwidth=0, thickness=8)
+        style.configure("Modern.Vertical.TScrollbar",
+                        background=BG_PANEL, troughcolor=BG_INSET,
+                        borderwidth=0, arrowsize=0)
 
     def _build_ui(self) -> None:
-        # Header
-        header = ttk.Frame(self.root, padding=(20, 18, 20, 10))
-        header.pack(fill="x")
-        ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(anchor="w")
-        ttk.Label(
-            header,
-            text="Groups playlist clips by name onto adjacent tracks. "
-                 "Preserves every clip's position, length, and properties.",
-            style="Subtitle.TLabel",
-            wraplength=700,
-        ).pack(anchor="w", pady=(2, 0))
+        outer = tk.Frame(self.root, bg=BG)
+        outer.pack(fill="both", expand=True, padx=24, pady=20)
 
-        # Drop zone
-        drop_wrap = ttk.Frame(self.root, padding=(20, 4, 20, 10))
-        drop_wrap.pack(fill="x")
-        self.drop_zone = tk.Frame(
-            drop_wrap, bg=BG_PANEL, height=80,
-            highlightbackground=BORDER, highlightthickness=1,
+        header = tk.Frame(outer, bg=BG)
+        header.pack(fill="x", pady=(0, 16))
+        title_frame = tk.Frame(header, bg=BG)
+        title_frame.pack(anchor="w")
+        tk.Label(title_frame, text="FLP", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 22, "bold")).pack(side="left")
+        tk.Label(title_frame, text=" Organizer", bg=BG, fg=FG,
+                 font=("Segoe UI", 22, "bold")).pack(side="left")
+        tk.Label(title_frame, text=f"  v{APP_VERSION}", bg=BG, fg=FG_MUTED,
+                 font=("Segoe UI", 10)).pack(side="left", padx=(4, 0), pady=(8, 0))
+        tk.Label(header,
+                 text="Automatically groups playlist clips by name onto adjacent tracks. "
+                      "Preserves every position, length, color, and property.",
+                 bg=BG, fg=FG_DIM, font=("Segoe UI", 10),
+                 wraplength=820, justify="left").pack(anchor="w", pady=(6, 0))
+
+        self.drop_zone = DropZone(outer, on_click=self._pick_file, height=120)
+        self.drop_zone.pack(fill="x", pady=(0, 16))
+
+        sort_card = tk.Frame(outer, bg=BG_PANEL)
+        sort_card.pack(fill="x", pady=(0, 16))
+        sort_inner = tk.Frame(sort_card, bg=BG_PANEL)
+        sort_inner.pack(fill="x", padx=18, pady=14)
+
+        row1 = tk.Frame(sort_inner, bg=BG_PANEL)
+        row1.pack(fill="x")
+        tk.Label(row1, text="Track order", bg=BG_PANEL, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+
+        self.sort_toggle = SortModeToggle(
+            sort_inner,
+            options=["Alphabetical (A–Z)", "By first appearance"],
+            initial=0, on_change=self._on_sort_changed, height=36,
         )
-        self.drop_zone.pack(fill="x")
-        self.drop_zone.pack_propagate(False)
+        self.sort_toggle.pack(fill="x", pady=(8, 6))
 
-        drop_inner = tk.Frame(self.drop_zone, bg=BG_PANEL)
-        drop_inner.pack(expand=True)
-        self.drop_label = tk.Label(
-            drop_inner,
-            text=("Drag & drop a .flp file here    or" if DND_AVAILABLE
-                  else "Drag & drop not available.    Click below to browse:"),
-            bg=BG_PANEL, fg=FG_DIM, font=("Segoe UI", 10),
+        self.sort_explanation = tk.Label(
+            sort_inner, text=self._sort_text(0),
+            bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 9),
+            wraplength=800, justify="left"
         )
-        self.drop_label.pack(side="left", padx=(14, 10), pady=14)
-        ttk.Button(drop_inner, text="Browse…", style="Secondary.TButton",
-                   command=self._pick_file).pack(side="left", pady=14)
+        self.sort_explanation.pack(anchor="w", pady=(4, 0))
 
-        # Info bar
-        info_bar = ttk.Frame(self.root, padding=(20, 0, 20, 6))
-        info_bar.pack(fill="x")
-        self.info_label = ttk.Label(info_bar, text="No file loaded.", style="Subtitle.TLabel")
-        self.info_label.pack(anchor="w")
+        self.info_label = tk.Label(
+            outer, text="No file loaded.",
+            bg=BG, fg=FG_DIM, font=("Segoe UI", 9),
+            anchor="w", justify="left"
+        )
+        self.info_label.pack(fill="x", pady=(0, 8))
 
-        # Preview tree
-        preview_wrap = ttk.Frame(self.root, padding=(20, 4, 20, 6))
-        preview_wrap.pack(fill="both", expand=True)
-
-        tree_frame = tk.Frame(preview_wrap, bg=BG_ALT,
-                              highlightbackground=BORDER, highlightthickness=1)
-        tree_frame.pack(fill="both", expand=True)
+        tree_card = tk.Frame(outer, bg=BG_PANEL)
+        tree_card.pack(fill="both", expand=True, pady=(0, 14))
+        tree_wrap = tk.Frame(tree_card, bg=BG_PANEL)
+        tree_wrap.pack(fill="both", expand=True, padx=2, pady=2)
 
         columns = ("tracks", "count", "name")
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=14)
-        self.tree.heading("tracks", text="Tracks")
-        self.tree.heading("count", text="Clips")
-        self.tree.heading("name", text="Group name")
-        self.tree.column("tracks", width=90, anchor="center", stretch=False)
-        self.tree.column("count",  width=70, anchor="center", stretch=False)
-        self.tree.column("name",   width=500, anchor="w")
+        self.tree = ttk.Treeview(tree_wrap, columns=columns, show="headings",
+                                 style="Modern.Treeview", height=12)
+        self.tree.heading("tracks", text="  TRACK")
+        self.tree.heading("count",  text="  CLIPS")
+        self.tree.heading("name",   text="  GROUP NAME")
+        self.tree.column("tracks", width=110, anchor="center", stretch=False)
+        self.tree.column("count",  width=90,  anchor="center", stretch=False)
+        self.tree.column("name",   width=600, anchor="w")
+        self.tree.tag_configure("odd", background=BG_ROW)
+        self.tree.tag_configure("even", background=BG_ROW_ALT)
 
-        vscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        vscroll = ttk.Scrollbar(tree_wrap, orient="vertical",
+                                command=self.tree.yview,
+                                style="Modern.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=vscroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vscroll.pack(side="right", fill="y")
 
-        # Progress bar
-        self.progress = ttk.Progressbar(self.root, mode="determinate", maximum=100)
+        self.progress = ttk.Progressbar(outer, mode="determinate", maximum=100,
+                                        style="Accent.Horizontal.TProgressbar")
 
-        # Bottom bar
-        bottom = ttk.Frame(self.root, padding=(20, 8, 20, 16))
+        bottom = tk.Frame(outer, bg=BG)
         bottom.pack(fill="x")
+        self.status_label = tk.Label(bottom, text="", bg=BG, fg=FG_DIM,
+                                     font=("Segoe UI", 9), anchor="w")
+        self.status_label.pack(side="left", fill="x", expand=True)
 
-        self.status_label = ttk.Label(bottom, text="", style="Subtitle.TLabel")
-        self.status_label.pack(side="left")
-
-        self.apply_btn = ttk.Button(bottom, text="Apply & Save…",
-                                    style="Accent.TButton", state="disabled",
-                                    command=self._apply)
+        self.apply_btn = RoundedButton(
+            bottom, text="Apply & Save", style="accent",
+            width=180, height=42, command=self._apply, bg=BG,
+            font=("Segoe UI", 11, "bold")
+        )
         self.apply_btn.pack(side="right")
+        self.apply_btn.configure_state(False)
 
-        self.clear_btn = ttk.Button(bottom, text="Clear", style="Secondary.TButton",
-                                    state="disabled", command=self._clear)
-        self.clear_btn.pack(side="right", padx=(0, 8))
+        self.clear_btn = RoundedButton(
+            bottom, text="Clear", style="secondary",
+            width=110, height=42, command=self._clear, bg=BG,
+            font=("Segoe UI", 10)
+        )
+        self.clear_btn.pack(side="right", padx=(0, 10))
+        self.clear_btn.configure_state(False)
 
-    # ---------- File loading ----------
+    def _sort_text(self, idx: int) -> str:
+        if idx == 0:
+            return ("Groups are ordered alphabetically, case-insensitive. "
+                    "Good for quickly finding a specific sample or pattern by name.")
+        return ("Groups are ordered by the earliest time any of their clips plays. "
+                "Elements that enter first (kick, bass) end up on top; "
+                "elements that come later (build-ups, drop fills, outro) go further down. "
+                "Good for reading the arrangement top-to-bottom like a timeline.")
+
+    def _on_sort_changed(self, idx: int) -> None:
+        self.sort_mode_idx = idx
+        self.sort_explanation.configure(text=self._sort_text(idx))
+        if self.current_path and self.current_result is not None:
+            threading.Thread(target=self._analyze_worker,
+                             args=(self.current_path,), daemon=True).start()
+            self.info_label.config(text="Recomputing plan…")
+
     def _on_drop(self, event) -> None:
         paths = self.root.tk.splitlist(event.data)
         if paths:
@@ -203,60 +495,65 @@ class FlpOrganizerApp:
             messagebox.showerror(APP_NAME, f"Not a valid .flp file:\n{path}")
             return
         self.current_path = path
-        self.info_label.config(text=f"Loading: {path.name}…")
+        self.info_label.config(text=f"Loading: {path.name}…", fg=FG_DIM)
         self.status_label.config(text="")
         self.tree.delete(*self.tree.get_children())
-        self.apply_btn.configure(state="disabled")
-        self.clear_btn.configure(state="disabled")
+        self.apply_btn.configure_state(False)
+        self.clear_btn.configure_state(False)
+        self.drop_zone.set_text(f"✓  {path.name}", "Click to choose a different file")
         self.root.update_idletasks()
-
-        # Run analysis in thread to keep UI responsive
         threading.Thread(target=self._analyze_worker, args=(path,), daemon=True).start()
+
+    def _current_sort_mode(self) -> str:
+        return (flp_core.SORT_BY_FIRST_APPEARANCE
+                if self.sort_mode_idx == 1
+                else flp_core.SORT_ALPHABETICAL)
 
     def _analyze_worker(self, path: Path) -> None:
         try:
-            result = flp_core.analyze(path)
+            result = flp_core.analyze(path, sort_mode=self._current_sort_mode())
         except Exception as e:
             self.root.after(0, lambda: self._on_analyze_error(e))
             return
         self.root.after(0, lambda: self._on_analyze_done(result))
 
     def _on_analyze_error(self, e: Exception) -> None:
-        self.info_label.config(text="Failed to read file.")
+        self.info_label.config(text="Failed to read file.", fg=ERROR_RED)
         messagebox.showerror(APP_NAME, f"Failed to read the file:\n\n{e}")
         self.current_path = None
+        self.drop_zone.set_text("Drop your .flp file here", "or click to browse")
 
     def _on_analyze_done(self, result: flp_core.AnalysisResult) -> None:
         self.current_result = result
+        self.tree.delete(*self.tree.get_children())
         assert self.current_path is not None
-        path = self.current_path
 
-        info = (f"{path.name}  |  FL {result.fl_version}  |  "
-                f"{result.total_clips} clips  |  "
-                f"{len(result.groups)} groups  |  "
-                f"{result.total_tracks_needed} tracks needed  |  "
+        info = (f"{self.current_path.name}    •    FL {result.fl_version}    •    "
+                f"{result.total_clips} clips    •    "
+                f"{len(result.groups)} groups    •    "
+                f"{result.total_tracks_needed} tracks needed    •    "
                 f"{len(result._patches)} clips will move")
-        self.info_label.config(text=info)
+        self.info_label.config(text=info, fg=FG_DIM)
 
-        for g in result.groups:
-            track_txt = (f"{g.first_track}" if g.lanes_used == 1
-                         else f"{g.first_track}-{g.first_track + g.lanes_used - 1}")
-            self.tree.insert("", "end", values=(track_txt, g.clip_count, g.name))
+        for i, g in enumerate(result.groups):
+            track_txt = (f"#{g.first_track}" if g.lanes_used == 1
+                         else f"#{g.first_track}–{g.first_track + g.lanes_used - 1}")
+            tag = "even" if i % 2 == 0 else "odd"
+            self.tree.insert("", "end", values=(track_txt, g.clip_count, g.name),
+                             tags=(tag,))
 
         if result.warnings:
-            self.status_label.config(text="⚠  " + result.warnings[0],
-                                     foreground=WARN_AMBER)
+            self.status_label.config(text="⚠  " + result.warnings[0], fg=WARN_AMBER)
         else:
-            self.status_label.config(text="Ready to apply.", foreground=OK_GREEN)
+            self.status_label.config(text="Ready to apply.", fg=OK_GREEN)
 
         has_changes = len(result._patches) > 0
-        self.apply_btn.configure(state=("normal" if has_changes else "disabled"))
-        self.clear_btn.configure(state="normal")
+        self.apply_btn.configure_state(has_changes)
+        self.clear_btn.configure_state(True)
         if not has_changes:
-            self.status_label.config(text="Nothing to change — file is already organized.",
-                                     foreground=FG_DIM)
+            self.status_label.config(text="Already organized — nothing to change.",
+                                     fg=FG_MUTED)
 
-    # ---------- Apply ----------
     def _apply(self) -> None:
         if not (self.current_result and self.current_path):
             return
@@ -271,8 +568,6 @@ class FlpOrganizerApp:
         if not out:
             return
         out_path = Path(out)
-
-        # Prevent overwriting the input accidentally
         try:
             if out_path.resolve() == self.current_path.resolve():
                 messagebox.showerror(
@@ -284,18 +579,16 @@ class FlpOrganizerApp:
         except Exception:
             pass
 
-        self.apply_btn.configure(state="disabled")
-        self.clear_btn.configure(state="disabled")
-        self.progress.pack(fill="x", padx=20, pady=(0, 6), before=self.tree.master.master)
+        self.apply_btn.configure_state(False)
+        self.clear_btn.configure_state(False)
+        self.progress.pack(fill="x", pady=(0, 8), before=self.status_label.master)
         self.progress["value"] = 0
-        self.status_label.config(text="Writing…", foreground=FG_DIM)
-
+        self.status_label.config(text="Writing…", fg=FG_DIM)
         threading.Thread(target=self._apply_worker, args=(out_path,), daemon=True).start()
 
     def _apply_worker(self, out_path: Path) -> None:
         assert self.current_result is not None
         try:
-            total = max(1, len(self.current_result._patches))
             def prog(done: int, tot: int) -> None:
                 self.root.after(0, lambda: self.progress.configure(value=done * 100 / tot))
             flp_core.apply_plan(self.current_result, out_path, progress=prog)
@@ -306,16 +599,16 @@ class FlpOrganizerApp:
 
     def _on_apply_error(self, e: Exception) -> None:
         self.progress.pack_forget()
-        self.status_label.config(text="Write failed.", foreground=WARN_AMBER)
-        self.apply_btn.configure(state="normal")
-        self.clear_btn.configure(state="normal")
+        self.status_label.config(text="Write failed.", fg=ERROR_RED)
+        self.apply_btn.configure_state(True)
+        self.clear_btn.configure_state(True)
         messagebox.showerror(APP_NAME, f"Could not write the file:\n\n{e}")
 
     def _on_apply_done(self, out_path: Path) -> None:
         self.progress.pack_forget()
-        self.status_label.config(text=f"✓  Saved: {out_path.name}", foreground=OK_GREEN)
-        self.apply_btn.configure(state="normal")
-        self.clear_btn.configure(state="normal")
+        self.status_label.config(text=f"✓  Saved: {out_path.name}", fg=OK_GREEN)
+        self.apply_btn.configure_state(True)
+        self.clear_btn.configure_state(True)
         if messagebox.askyesno(
             APP_NAME,
             f"File saved successfully:\n{out_path}\n\nOpen the containing folder?",
@@ -337,10 +630,11 @@ class FlpOrganizerApp:
         self.current_path = None
         self.current_result = None
         self.tree.delete(*self.tree.get_children())
-        self.info_label.config(text="No file loaded.")
-        self.status_label.config(text="", foreground=FG_DIM)
-        self.apply_btn.configure(state="disabled")
-        self.clear_btn.configure(state="disabled")
+        self.info_label.config(text="No file loaded.", fg=FG_DIM)
+        self.status_label.config(text="", fg=FG_DIM)
+        self.apply_btn.configure_state(False)
+        self.clear_btn.configure_state(False)
+        self.drop_zone.set_text("Drop your .flp file here", "or click to browse")
 
 
 def main() -> None:
