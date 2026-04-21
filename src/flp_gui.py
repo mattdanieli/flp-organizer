@@ -24,7 +24,7 @@ import flp_core
 
 
 APP_NAME = "FLP Organizer"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 # --- FL Studio-inspired palette ------------------------------------------------
 BG              = "#141416"
@@ -72,14 +72,15 @@ def _darken(hex_color: str, amount: float = 0.15) -> str:
 
 
 def _rounded_on(canvas, x1, y1, x2, y2, r, fill, outline=""):
-    canvas.create_arc(x1, y1, x1 + 2*r, y1 + 2*r, start=90, extent=90,
-                      fill=fill, outline=outline)
-    canvas.create_arc(x2 - 2*r, y1, x2, y1 + 2*r, start=0, extent=90,
-                      fill=fill, outline=outline)
-    canvas.create_arc(x1, y2 - 2*r, x1 + 2*r, y2, start=180, extent=90,
-                      fill=fill, outline=outline)
-    canvas.create_arc(x2 - 2*r, y2 - 2*r, x2, y2, start=270, extent=90,
-                      fill=fill, outline=outline)
+    """Draw a filled rounded rectangle using ovals (robust across tk versions)."""
+    if not outline:
+        outline = fill
+    # Four corner circles
+    canvas.create_oval(x1, y1, x1 + 2*r, y1 + 2*r, fill=fill, outline=outline)
+    canvas.create_oval(x2 - 2*r, y1, x2, y1 + 2*r, fill=fill, outline=outline)
+    canvas.create_oval(x1, y2 - 2*r, x1 + 2*r, y2, fill=fill, outline=outline)
+    canvas.create_oval(x2 - 2*r, y2 - 2*r, x2, y2, fill=fill, outline=outline)
+    # Two rectangles to cover the inside
     canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline=outline)
     canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline=outline)
 
@@ -136,22 +137,20 @@ class RoundedButton(tk.Canvas):
         bg_col, fg_col = self._colors[self._state]
         r = min(self._radius, h // 2, w // 2)
 
+        # Base shape
+        _rounded_on(self, 1, 1, w - 1, h - 1, r, fill=bg_col)
+
+        # Gradient accent: draw a slightly lighter rounded shape on top, inset
         if self._style == "accent" and self._state in ("normal", "hover"):
             glow = _lighten(bg_col, 0.22 if self._state == "hover" else 0.14)
-            _rounded_on(self, 1, 1, w - 1, h - 1, r, fill=bg_col)
-            _rounded_on(self, 2, 2, w - 2, h // 2 + 2, r, fill=glow)
-            self.create_rectangle(2 + r, h // 2 + 1, w - 2 - r, h // 2 + 2,
-                                  fill=bg_col, outline="")
-            self.create_rectangle(1, h // 2 + 2, w - 1, h - 1,
-                                  fill=bg_col, outline="")
-            # redraw bottom rounded corners of the base color
-            self.create_arc(1, h - 1 - 2*r, 1 + 2*r, h - 1, start=180, extent=90,
-                            fill=bg_col, outline="")
-            self.create_arc(w - 1 - 2*r, h - 1 - 2*r, w - 1, h - 1, start=270, extent=90,
-                            fill=bg_col, outline="")
-        else:
-            _rounded_on(self, 1, 1, w - 1, h - 1, r, fill=bg_col)
+            # Shorter rounded band at the top half
+            inset_top = 3
+            band_h = max(h // 2 - inset_top, 4)
+            _rounded_on(self, 3, inset_top,
+                        w - 3, inset_top + band_h,
+                        max(r - 2, 2), fill=glow)
 
+        # Label
         self.create_text(w // 2, h // 2, text=self._text, fill=fg_col, font=self._font)
         try:
             self.configure(cursor="hand2" if self._state != "disabled" else "arrow")
@@ -300,10 +299,21 @@ class DropZone(tk.Canvas):
                 y += dash + gap
         hdashes(y1); hdashes(y2)
         vdashes(x1); vdashes(x2)
-        for (ax, ay, start) in [(x1, y1, 90), (x2 - 2*r, y1, 0),
-                                 (x1, y2 - 2*r, 180), (x2 - 2*r, y2 - 2*r, 270)]:
-            self.create_arc(ax, ay, ax + 2*r, ay + 2*r, start=start, extent=90,
-                            style="arc", outline=color, width=2)
+        # Corners: approximate arcs with short line segments
+        import math
+        for (cx, cy, start_deg) in [(x1 + r, y1 + r, 180),
+                                     (x2 - r, y1 + r, 270),
+                                     (x1 + r, y2 - r, 90),
+                                     (x2 - r, y2 - r, 0)]:
+            # Draw ~6 short dashes along the 90-degree arc
+            for step in range(0, 90, 15):
+                a1 = math.radians(start_deg + step)
+                a2 = math.radians(start_deg + step + 8)
+                self.create_line(
+                    cx + r * math.cos(a1), cy + r * math.sin(a1),
+                    cx + r * math.cos(a2), cy + r * math.sin(a2),
+                    fill=color, width=2
+                )
 
     def _upload_icon(self, cx, cy, color):
         self.create_polygon(cx, cy - 12, cx - 8, cy - 4, cx + 8, cy - 4,
