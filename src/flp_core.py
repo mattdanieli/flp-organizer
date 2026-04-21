@@ -199,8 +199,19 @@ def _assign_lanes(clips: list[ClipInfo], base_track_0: int) -> int:
 
 # ----- Main entry points -----
 
-def analyze(flp_path: Path | str) -> AnalysisResult:
-    """Parse the .flp file and compute the grouping plan. Does not modify anything."""
+SORT_ALPHABETICAL = "alphabetical"
+SORT_BY_FIRST_APPEARANCE = "first_appearance"
+
+
+def analyze(flp_path: Path | str, sort_mode: str = SORT_ALPHABETICAL) -> AnalysisResult:
+    """Parse the .flp file and compute the grouping plan. Does not modify anything.
+
+    sort_mode:
+        SORT_ALPHABETICAL       - groups ordered A-Z, case-insensitive (default)
+        SORT_BY_FIRST_APPEARANCE - groups ordered by the earliest position of
+                                   any clip in that group (clips that play
+                                   first end up on the top tracks)
+    """
     path = Path(flp_path)
     data = path.read_bytes()
 
@@ -359,7 +370,16 @@ def analyze(flp_path: Path | str) -> AnalysisResult:
         for c in arr_clips:
             groups[c.name].append(c)
 
-        sorted_names = sorted(groups.keys(), key=lambda s: s.lower())
+        # Sort groups according to the requested mode
+        if sort_mode == SORT_BY_FIRST_APPEARANCE:
+            # Earliest clip position in each group determines its order
+            sorted_names = sorted(
+                groups.keys(),
+                key=lambda n: min(c.position for c in groups[n])
+            )
+        else:
+            # Default: alphabetical, case-insensitive
+            sorted_names = sorted(groups.keys(), key=lambda s: s.lower())
         base_track_0 = 0
         for name in sorted_names:
             group_clips = groups[name]
@@ -407,8 +427,9 @@ def apply_plan(result: AnalysisResult, output_path: Path | str,
 
 
 def reorganize(flp_path: Path | str, output_path: Path | str,
-               progress: Optional[Callable[[int, int], None]] = None) -> AnalysisResult:
+               progress: Optional[Callable[[int, int], None]] = None,
+               sort_mode: str = SORT_ALPHABETICAL) -> AnalysisResult:
     """One-shot: analyze + write. Returns the AnalysisResult."""
-    result = analyze(flp_path)
+    result = analyze(flp_path, sort_mode=sort_mode)
     apply_plan(result, output_path, progress=progress)
     return result
