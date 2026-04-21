@@ -26,6 +26,10 @@ def main() -> int:
     parser.add_argument("input", type=Path, help="Input .flp file")
     parser.add_argument("output", type=Path, nargs="?",
                         help="Output .flp file (default: INPUT_organized.flp)")
+    parser.add_argument("--sort", default="alpha",
+                        choices=["alpha", "first"],
+                        help="Track order: 'alpha' = alphabetical A-Z (default), "
+                             "'first' = by time of first appearance.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Only analyze and print the plan, don't write output.")
     parser.add_argument("-q", "--quiet", action="store_true",
@@ -43,8 +47,12 @@ def main() -> int:
         print("Error: output must differ from input", file=sys.stderr)
         return 1
 
+    sort_mode = (flp_core.SORT_BY_FIRST_APPEARANCE
+                 if args.sort == "first"
+                 else flp_core.SORT_ALPHABETICAL)
+
     try:
-        result = flp_core.analyze(args.input)
+        result = flp_core.analyze(args.input, sort_mode=sort_mode)
     except Exception as e:
         print(f"Error while reading {args.input}: {e}", file=sys.stderr)
         return 2
