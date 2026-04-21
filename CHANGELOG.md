@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] - 2026-04-21
+
+### Fixed
+- Language selector dropdown was invisible because the top-bar frame was
+  placed on the same grid row as the header, causing the header to overlap
+  and hide it. The layout now reserves a dedicated row for the language
+  selector above the header.
+
 ## [1.3.0] - 2026-04-21
 
 ### Added
