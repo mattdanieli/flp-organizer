@@ -31,7 +31,7 @@ from translations import t, LANGUAGES, DEFAULT_LANG
 
 
 APP_NAME = "FLP Organizer"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 AUTHOR = "Matt Danieli"
 PAYPAL_URL = "https://paypal.me/mattdanieli"
 BATCH_LIMIT = 30
@@ -370,19 +370,19 @@ class FlpOrganizerApp:
         outer.pack(fill="both", expand=True)
 
         outer.grid_columnconfigure(0, weight=1)
-        # Rows: 0 header, 1 mode_tabs, 2 drop, 3 single_controls/batch_controls,
-        #       4 info, 5 tree (expand), 6 progress, 7 bottom buttons, 8 footer,
-        #       9 footer disclaimer
-        outer.grid_rowconfigure(5, weight=1)
+        # Rows: 0 topbar (language), 1 header, 2 mode_tabs, 3 drop,
+        #       4 controls card, 5 info, 6 tree (expand), 7 progress,
+        #       8 bottom buttons, 9 footer, 10 footer disclaimer
+        outer.grid_rowconfigure(6, weight=1)
 
-        # ------- Top bar with language selector -------
+        # ------- Top bar with language selector (row 0) -------
         topbar = ttk.Frame(outer, style="TFrame")
-        topbar.grid(row=0, column=0, sticky="ew")
-        topbar.grid_columnconfigure(1, weight=1)
+        topbar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        topbar.grid_columnconfigure(0, weight=1)   # pushes lang_frame to the right
 
         # Language selector on the right
         lang_frame = ttk.Frame(topbar, style="TFrame")
-        lang_frame.grid(row=0, column=2, sticky="e")
+        lang_frame.grid(row=0, column=1, sticky="e")
         self.lang_label = ttk.Label(lang_frame, text=t("language_label", self.lang),
                                      style="LangLabel.TLabel")
         self.lang_label.pack(side="left", padx=(0, 6))
@@ -394,9 +394,9 @@ class FlpOrganizerApp:
         self.lang_combo.pack(side="left")
         self.lang_combo.bind("<<ComboboxSelected>>", self._on_lang_changed)
 
-        # ------- Header (centered) -------
+        # ------- Header (centered, row 1) -------
         header = ttk.Frame(outer, style="TFrame")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         header.grid_columnconfigure(0, weight=1)
 
         title_row = ttk.Frame(header, style="TFrame")
@@ -425,7 +425,7 @@ class FlpOrganizerApp:
 
         # ------- Mode tabs (Single / Batch) -------
         mode_bar = ttk.Frame(outer, style="TFrame")
-        mode_bar.grid(row=1, column=0, sticky="ew", pady=(4, 10))
+        mode_bar.grid(row=2, column=0, sticky="ew", pady=(4, 10))
         mode_bar.grid_columnconfigure(0, weight=1)
         mode_bar.grid_columnconfigure(3, weight=1)
 
@@ -451,7 +451,7 @@ class FlpOrganizerApp:
             outer, bg=BG_PANEL, height=80,
             highlightbackground=BORDER, highlightthickness=1, cursor="hand2",
         )
-        self.drop_area.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        self.drop_area.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         self.drop_area.grid_propagate(False)
         self.drop_area.bind("<Button-1>", lambda e: self._pick_files())
         self.drop_area.bind("<Enter>", lambda e: self._drop_hover(True))
@@ -468,7 +468,7 @@ class FlpOrganizerApp:
         controls_card = ttk.Labelframe(
             outer, text="", style="Card.TLabelframe", padding=14
         )
-        controls_card.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        controls_card.grid(row=4, column=0, sticky="ew", pady=(0, 10))
         controls_card.grid_columnconfigure(0, weight=1)
         controls_card.grid_columnconfigure(1, weight=1)
 
@@ -584,12 +584,12 @@ class FlpOrganizerApp:
         # ------- Info bar -------
         self.info_label = ttk.Label(outer, text=t("no_file", self.lang),
                                      style="Subtitle.TLabel")
-        self.info_label.grid(row=4, column=0, sticky="w", pady=(0, 6))
+        self.info_label.grid(row=5, column=0, sticky="w", pady=(0, 6))
 
         # ------- Tree preview -------
         tree_wrap = tk.Frame(outer, bg=BG_PANEL,
                              highlightbackground=BORDER, highlightthickness=1)
-        tree_wrap.grid(row=5, column=0, sticky="nsew", pady=(0, 10))
+        tree_wrap.grid(row=6, column=0, sticky="nsew", pady=(0, 10))
         tree_wrap.grid_rowconfigure(0, weight=1)
         tree_wrap.grid_columnconfigure(0, weight=1)
 
@@ -619,7 +619,7 @@ class FlpOrganizerApp:
 
         # ------- Bottom button bar -------
         bottom = ttk.Frame(outer, style="TFrame")
-        bottom.grid(row=7, column=0, sticky="ew", pady=(0, 4))
+        bottom.grid(row=8, column=0, sticky="ew", pady=(0, 4))
         bottom.grid_columnconfigure(0, weight=1)
 
         self.status_label = ttk.Label(bottom, text="", style="Status.TLabel")
@@ -642,7 +642,7 @@ class FlpOrganizerApp:
 
         # ------- Footer -------
         footer = ttk.Frame(outer, style="TFrame")
-        footer.grid(row=8, column=0, sticky="ew", pady=(12, 0))
+        footer.grid(row=9, column=0, sticky="ew", pady=(12, 0))
         footer.grid_columnconfigure(0, weight=1)
         footer.grid_columnconfigure(2, weight=1)
 
@@ -666,7 +666,7 @@ class FlpOrganizerApp:
             outer, text=t("footer_disclaimer", self.lang),
             style="Caption.TLabel"
         )
-        self.footer_disclaimer_label.grid(row=9, column=0, pady=(6, 0))
+        self.footer_disclaimer_label.grid(row=10, column=0, pady=(6, 0))
 
         # Set initial language value in combobox
         self.lang_combo.set(LANGUAGES[self.lang])
@@ -967,7 +967,7 @@ class FlpOrganizerApp:
 
         self.apply_btn.configure(state="disabled")
         self.clear_btn.configure(state="disabled")
-        self.progress.grid(row=6, column=0, sticky="ew", pady=(0, 6))
+        self.progress.grid(row=7, column=0, sticky="ew", pady=(0, 6))
         self.progress["value"] = 0
         self._set_status(t("writing", self.lang), kind="dim")
         threading.Thread(target=self._apply_worker_single,
@@ -1004,7 +1004,7 @@ class FlpOrganizerApp:
             return
         self.apply_btn.configure(state="disabled")
         self.clear_btn.configure(state="disabled")
-        self.progress.grid(row=6, column=0, sticky="ew", pady=(0, 6))
+        self.progress.grid(row=7, column=0, sticky="ew", pady=(0, 6))
         self.progress["value"] = 0
         threading.Thread(target=self._apply_worker_batch, daemon=True).start()
 
