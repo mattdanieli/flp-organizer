@@ -11,6 +11,9 @@ It works by patching **only the track-index bytes** of each playlist item. Every
 ## Features
 
 - **Drag & drop** any `.flp` file onto the window
+- **Two sorting modes** selectable from the UI:
+  - **Alphabetical (A–Z)** — best for finding a specific sample or pattern quickly
+  - **By first appearance** — orders groups by the earliest time any clip plays, so the arrangement reads top-to-bottom like a song timeline
 - **Preview** the grouping plan before committing (how many tracks, which clips go where)
 - **One-click apply** — writes a new `.flp`, never touches your original
 - Groups by **sample file name**, **channel name**, or **pattern name** (automatically picks the right one for each clip)
@@ -85,7 +88,7 @@ If a future FL version changes the layout again, the auto-detect may fail. In th
 ### Build steps (Windows)
 
 ```bat
-git clone https://github.com/mattdanieli/flp-organizer.git
+git clone https://github.com/YOUR_USERNAME/flp-organizer.git
 cd flp-organizer
 build.bat
 ```
