@@ -25,7 +25,7 @@ import flp_core
 
 
 APP_NAME = "FLP Organizer"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 AUTHOR = "Matt Danieli"
 PAYPAL_URL = "https://paypal.me/mattdanieli"
 
@@ -94,28 +94,16 @@ def show_disclaimer_if_needed(root) -> bool:
     dlg.configure(bg=BG)
     dlg.transient(root)
     dlg.grab_set()
-    dlg.resizable(False, False)
+    dlg.resizable(True, True)        # let the user resize if needed
+    dlg.minsize(480, 380)
 
-    w, h = 580, 420
+    w, h = 620, 500
     root.update_idletasks()
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
-    x = (sw - w) // 2
-    y = (sh - h) // 2
+    x = max(0, (sw - w) // 2)
+    y = max(0, (sh - h) // 2)
     dlg.geometry(f"{w}x{h}+{x}+{y}")
-
-    tk.Label(dlg, text="Before you start",
-             bg=BG, fg=ACCENT, font=("Segoe UI", 16, "bold"),
-             ).pack(anchor="w", padx=24, pady=(20, 8))
-
-    txt_frame = tk.Frame(dlg, bg=BG)
-    txt_frame.pack(fill="both", expand=True, padx=24, pady=(0, 16))
-    txt = tk.Text(txt_frame, bg=BG_PANEL, fg=FG, font=("Segoe UI", 9),
-                  wrap="word", borderwidth=0, highlightthickness=1,
-                  highlightbackground=BORDER, padx=12, pady=10)
-    txt.insert("1.0", DISCLAIMER_TEXT)
-    txt.configure(state="disabled")
-    txt.pack(fill="both", expand=True)
 
     result = {"accepted": False}
 
@@ -131,13 +119,30 @@ def show_disclaimer_if_needed(root) -> bool:
         result["accepted"] = False
         dlg.destroy()
 
-    btn_bar = tk.Frame(dlg, bg=BG)
-    btn_bar.pack(fill="x", padx=24, pady=(0, 18))
+    # IMPORTANT: pack buttons FIRST (at the bottom) so they are always
+    # reserved space, then the title, then the scrollable text fills what
+    # remains. This guarantees the buttons are never clipped.
+    btn_bar = tk.Frame(dlg, bg=BG, height=60)
+    btn_bar.pack(side="bottom", fill="x", padx=24, pady=(8, 18))
+    btn_bar.pack_propagate(False)
 
     ttk.Button(btn_bar, text="Decline", style="Secondary.TButton",
-               command=decline).pack(side="right", padx=(8, 0))
+               command=decline).pack(side="right", padx=(10, 0))
     ttk.Button(btn_bar, text="I agree", style="Accent.TButton",
                command=accept).pack(side="right")
+
+    tk.Label(dlg, text="Before you start",
+             bg=BG, fg=ACCENT, font=("Segoe UI", 16, "bold"),
+             ).pack(side="top", anchor="w", padx=24, pady=(20, 8))
+
+    txt_frame = tk.Frame(dlg, bg=BG)
+    txt_frame.pack(side="top", fill="both", expand=True, padx=24, pady=(0, 10))
+    txt = tk.Text(txt_frame, bg=BG_PANEL, fg=FG, font=("Segoe UI", 9),
+                  wrap="word", borderwidth=0, highlightthickness=1,
+                  highlightbackground=BORDER, padx=12, pady=10)
+    txt.insert("1.0", DISCLAIMER_TEXT)
+    txt.configure(state="disabled")
+    txt.pack(fill="both", expand=True)
 
     dlg.protocol("WM_DELETE_WINDOW", decline)
     dlg.wait_window()
