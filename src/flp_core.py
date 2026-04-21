@@ -51,6 +51,16 @@ MAX_TRACKS = 500           # FL Studio 21+ has 500 playlist tracks
 ITEM_SIZE_CANDIDATES = (32, 60, 64, 80, 320)  # smallest first — 80 is FL 25+
 
 
+# ----- Sort mode constants -----
+SORT_ALPHABETICAL        = "alphabetical"
+SORT_BY_FIRST_APPEARANCE = "first_appearance"
+
+# Sub-sort modifiers (applied on top of the primary sort mode)
+SUB_BY_LENGTH   = "length"    # longer clips first within the same primary order
+SUB_BY_TYPE     = "type"      # audio clips first, then patterns, then automation
+SUB_BY_COLOR    = "color"     # groups with the same primary rank are then grouped by color
+
+
 # ----- Data classes -----
 
 @dataclass
@@ -199,18 +209,25 @@ def _assign_lanes(clips: list[ClipInfo], base_track_0: int) -> int:
 
 # ----- Main entry points -----
 
-SORT_ALPHABETICAL = "alphabetical"
-SORT_BY_FIRST_APPEARANCE = "first_appearance"
+SORT_ALPHABETICAL_OLD = "alphabetical"  # legacy alias kept for compatibility
 
 
-def analyze(flp_path: Path | str, sort_mode: str = SORT_ALPHABETICAL) -> AnalysisResult:
+def analyze(flp_path: Path | str,
+            sort_mode: str = SORT_ALPHABETICAL,
+            sub_sort: Optional[list[str]] = None) -> AnalysisResult:
     """Parse the .flp file and compute the grouping plan. Does not modify anything.
 
     sort_mode:
-        SORT_ALPHABETICAL       - groups ordered A-Z, case-insensitive (default)
+        SORT_ALPHABETICAL        - groups ordered A-Z, case-insensitive (default)
         SORT_BY_FIRST_APPEARANCE - groups ordered by the earliest position of
-                                   any clip in that group (clips that play
-                                   first end up on the top tracks)
+                                   any clip in that group
+
+    sub_sort: optional list of sub-sort modifiers that refine the order within
+              the primary sort. They are applied as tie-breakers in the listed
+              order. Available modifiers:
+                SUB_BY_LENGTH - groups with longer average clip length first
+                SUB_BY_TYPE   - audio clips first, then patterns
+                SUB_BY_COLOR  - (reserved for future; currently no-op)
     """
     path = Path(flp_path)
     data = path.read_bytes()
@@ -370,16 +387,67 @@ def analyze(flp_path: Path | str, sort_mode: str = SORT_ALPHABETICAL) -> Analysi
         for c in arr_clips:
             groups[c.name].append(c)
 
-        # Sort groups according to the requested mode
-        if sort_mode == SORT_BY_FIRST_APPEARANCE:
-            # Earliest clip position in each group determines its order
-            sorted_names = sorted(
-                groups.keys(),
-                key=lambda n: min(c.position for c in groups[n])
-            )
+        # ---------- Compute the ordering of groups ----------
+        # Build the primary sort key per group
+        def primary_key(group_name: str):
+            clips_in_group = groups[group_name]
+            if sort_mode == SORT_BY_FIRST_APPEARANCE:
+                return min(c.position for c in clips_in_group)
+            # Alphabetical - case-insensitive. Use the name itself as key.
+            return group_name.lower()
+
+        # Build the sub-sort composite key (applied as tie-breaker AND also
+        # used to re-group within the primary order)
+        def composite_key(group_name: str):
+            clips_in_group = groups[group_name]
+            key = [primary_key(group_name)]
+            for modifier in (sub_sort or []):
+                if modifier == SUB_BY_LENGTH:
+                    # Longer average length first — negate for ascending sort
+                    avg_len = sum(c.length for c in clips_in_group) / len(clips_in_group)
+                    key.append(-avg_len)
+                elif modifier == SUB_BY_TYPE:
+                    # Channel (audio) = 0, pattern = 1  → audio goes first
+                    most_common_kind = clips_in_group[0].kind  # clips in a group share name
+                    key.append(0 if most_common_kind == "channel" else 1)
+                elif modifier == SUB_BY_COLOR:
+                    # No-op for now; color parsing not yet available.
+                    # Kept in the API so the GUI checkbox is future-proof.
+                    pass
+            return tuple(key)
+
+        # If there is no sub-sort, the behaviour is identical to before
+        if not sub_sort:
+            if sort_mode == SORT_BY_FIRST_APPEARANCE:
+                sorted_names = sorted(groups.keys(),
+                                      key=lambda n: min(c.position for c in groups[n]))
+            else:
+                sorted_names = sorted(groups.keys(), key=lambda s: s.lower())
         else:
-            # Default: alphabetical, case-insensitive
-            sorted_names = sorted(groups.keys(), key=lambda s: s.lower())
+            # With sub-sort: the composite key decides the order. The sub-sort
+            # acts as BOTH a tie-breaker AND a grouping criterion — for example
+            # "Alphabetical + By type" produces all audio names A-Z first, then
+            # all pattern names A-Z.
+            # To do this we reverse the order: apply sub-sort modifiers first,
+            # then primary. That way groups with the same sub-sort key stay
+            # contiguous and are internally sorted by the primary key.
+            def grouping_key(group_name: str):
+                clips_in_group = groups[group_name]
+                parts = []
+                for modifier in sub_sort:
+                    if modifier == SUB_BY_TYPE:
+                        parts.append(0 if clips_in_group[0].kind == "channel" else 1)
+                    elif modifier == SUB_BY_LENGTH:
+                        avg_len = sum(c.length for c in clips_in_group) / len(clips_in_group)
+                        parts.append(-avg_len)
+                    elif modifier == SUB_BY_COLOR:
+                        # Placeholder: all groups share colour bucket 0
+                        parts.append(0)
+                # Primary sort added last -> becomes the innermost ordering
+                parts.append(primary_key(group_name))
+                return tuple(parts)
+
+            sorted_names = sorted(groups.keys(), key=grouping_key)
         base_track_0 = 0
         for name in sorted_names:
             group_clips = groups[name]
@@ -428,8 +496,9 @@ def apply_plan(result: AnalysisResult, output_path: Path | str,
 
 def reorganize(flp_path: Path | str, output_path: Path | str,
                progress: Optional[Callable[[int, int], None]] = None,
-               sort_mode: str = SORT_ALPHABETICAL) -> AnalysisResult:
+               sort_mode: str = SORT_ALPHABETICAL,
+               sub_sort: Optional[list[str]] = None) -> AnalysisResult:
     """One-shot: analyze + write. Returns the AnalysisResult."""
-    result = analyze(flp_path, sort_mode=sort_mode)
+    result = analyze(flp_path, sort_mode=sort_mode, sub_sort=sub_sort)
     apply_plan(result, output_path, progress=progress)
     return result
