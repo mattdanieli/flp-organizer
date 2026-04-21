@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-04-20
+
+### Added
+- **Two sorting modes selectable from the GUI:**
+  - **Alphabetical (A–Z)** — groups ordered by name, case-insensitive (original default).
+  - **By first appearance** — groups ordered by the earliest time any of their
+    clips plays. Elements that enter first (kick, bass) end up on top; build-ups,
+    fills, and outros go further down. Perfect for reading the arrangement
+    top-to-bottom like a timeline.
+- GUI redesign with FL Studio-inspired dark theme and orange accents.
+- Rounded corners, hover animations, gradient highlights on the accent button.
+- Sliding segmented toggle for sort mode selection, with an explanation of what
+  each mode does below it.
+- Switching sort mode re-computes the plan instantly without reloading the file.
+- CLI now accepts `--sort alpha` or `--sort first`.
+
+### Changed
+- GUI font and spacing refined for a more modern look.
+- Alternating row colors in the preview table for better readability.
+- Track numbers displayed as `#N` / `#N–M` for clarity.
+
 ## [1.0.0] - 2026-04-20
 
 ### Added
