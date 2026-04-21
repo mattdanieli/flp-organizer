@@ -14,11 +14,15 @@ It works by patching **only the track-index bytes** of each playlist item. Every
 - **Two sorting modes** selectable from the UI:
   - **Alphabetical (A–Z)** — best for finding a specific sample or pattern quickly
   - **By first appearance** — orders groups by the earliest time any clip plays, so the arrangement reads top-to-bottom like a song timeline
+- **Sub-sort modifiers** (combine freely with the two primary modes):
+  - *Group by type*: audio clips come before patterns
+  - *Sort by clip length*: groups with longer clips first
+- **Batch mode** — process up to 30 `.flp` files in a single run, with optional custom output folder
+- **Multi-language UI** — English, Deutsch, Español, Français, Italiano, Русский
 - **Preview** the grouping plan before committing (how many tracks, which clips go where)
 - **One-click apply** — writes a new `.flp`, never touches your original
 - Groups by **sample file name**, **channel name**, or **pattern name** (automatically picks the right one for each clip)
 - **Lane assignment** — when clips of the same group overlap in time, they go on adjacent tracks instead of on top of each other
-- **Alphabetical** track order (case-insensitive)
 - Preserves every clip's **position, length, color, offsets, and every other property**
 - **Safe by design** — output is always a different file; original is read-only during processing
 - **Zero config, zero external dependencies at runtime** (standalone Windows `.exe`)
