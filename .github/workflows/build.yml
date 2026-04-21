@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -25,6 +27,10 @@ jobs:
       - name: Build with PyInstaller
         run: |
           pyinstaller --onefile --noconsole --name FLPOrganizer `
+            --icon docs/icon.ico `
+            --add-data "docs/icon.ico;docs" `
+            --add-data "docs/icon_32.png;docs" `
+            --add-data "docs/icon_64.png;docs" `
             --hidden-import tkinterdnd2 `
             --paths src src/flp_gui.py
 
