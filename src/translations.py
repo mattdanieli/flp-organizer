@@ -180,12 +180,12 @@ _translations: Dict[str, Dict[str, str]] = {
         "ru": "Автоматически переименовать дорожки по именам групп",
     },
     "opt_color_tracks": {
-        "en": "Auto-color tracks (coming soon)",
-        "de": "Spuren automatisch einfärben (in Kürze)",
-        "es": "Colorear pistas automáticamente (próximamente)",
-        "fr": "Colorer automatiquement les pistes (bientôt)",
-        "it": "Colora tracce automaticamente (in arrivo)",
-        "ru": "Автораскраска дорожек (скоро)",
+        "en": "Auto-color tracks to match group color",
+        "de": "Spuren automatisch einfärben (Gruppenfarbe)",
+        "es": "Colorear pistas automáticamente según el grupo",
+        "fr": "Colorer automatiquement les pistes (couleur du groupe)",
+        "it": "Colora tracce automaticamente (colore del gruppo)",
+        "ru": "Автораскраска дорожек по цвету группы",
     },
     "opt_remove_empty": {
         "en": "Remove empty tracks (coming soon)",
