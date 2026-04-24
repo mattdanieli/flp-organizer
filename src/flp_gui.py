@@ -31,7 +31,7 @@ from translations import t, LANGUAGES, DEFAULT_LANG
 
 
 APP_NAME = "FLP Organizer"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 AUTHOR = "Matt Danieli"
 PAYPAL_URL = "https://paypal.me/mattdanieli"
 BATCH_LIMIT = 30
@@ -542,14 +542,16 @@ class FlpOrganizerApp:
         self.opt_rename_cb = ttk.Checkbutton(
             right_col, text=t("opt_rename_tracks", self.lang),
             variable=self.opt_rename_var, style="Opt.TCheckbutton",
+            command=self._on_sort_changed,
         )
         self.opt_rename_cb.pack(anchor="w")
         self.opt_color_cb = ttk.Checkbutton(
             right_col, text=t("opt_color_tracks", self.lang),
             variable=self.opt_color_var, style="Opt.TCheckbutton",
+            command=self._on_sort_changed,
         )
         self.opt_color_cb.pack(anchor="w")
-        self.opt_color_cb.state(["disabled"])    # coming soon
+        # opt_color enabled in v1.5.0
 
         self.opt_remove_empty_cb = ttk.Checkbutton(
             right_col, text=t("opt_remove_empty", self.lang),
@@ -868,6 +870,8 @@ class FlpOrganizerApp:
             result = flp_core.analyze(
                 path, sort_mode=self._current_sort_mode(),
                 sub_sort=self._get_sub_sort(),
+                apply_auto_color=bool(self.opt_color_var.get()),
+                apply_auto_rename=bool(self.opt_rename_var.get()),
             )
         except Exception as e:
             self.root.after(0, lambda: self._on_analyze_error(e))
@@ -1015,6 +1019,8 @@ class FlpOrganizerApp:
         sort_mode = self._current_sort_mode()
         sub_sort = self._get_sub_sort()
         out_dir = self.batch_output_dir
+        auto_color = bool(self.opt_color_var.get())
+        auto_rename = bool(self.opt_rename_var.get())
 
         for i, in_path in enumerate(self.batch_paths, 1):
             self.root.after(
@@ -1024,7 +1030,9 @@ class FlpOrganizerApp:
             )
             try:
                 result = flp_core.analyze(in_path, sort_mode=sort_mode,
-                                           sub_sort=sub_sort)
+                                           sub_sort=sub_sort,
+                                           apply_auto_color=auto_color,
+                                           apply_auto_rename=auto_rename)
                 if out_dir is not None:
                     out_path = out_dir / (in_path.stem + "_organized.flp")
                 else:
