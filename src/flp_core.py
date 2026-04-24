@@ -44,6 +44,8 @@ ID_TRACK_NAME       = TEXT_BASE + 47         # 239
 ID_ARRANGEMENT_NAME = TEXT_BASE + 49         # 241
 ID_PLAYLIST         = DATA_BASE + 25         # 233
 ID_TRACK_DATA       = DATA_BASE + 30         # 238
+ID_CHANNEL_COLOR    = DWORD_BASE + 0         # 128 - channel colour, 4 bytes 0x00RRGGBB
+ID_PATTERN_COLOR    = DWORD_BASE + 21        # 149 - pattern colour (tentative)
 
 PATTERN_BASE_VAL = 20480   # item_index > PATTERN_BASE_VAL => pattern clip
 MAX_TRACKS = 500           # FL Studio 21+ has 500 playlist tracks
@@ -71,6 +73,7 @@ class ClipInfo:
     length: int                 # Length in PPQ ticks
     old_track: int              # Original track, 1-based
     new_track: int = 0          # Assigned track, 1-based
+    color: Optional[int] = None  # 24-bit RGB of source channel/pattern (0xRRGGBB) or None
     # Byte offsets in the file (used by the writer)
     item_offset: int = 0
     rvidx_offset: int = 0
@@ -186,6 +189,53 @@ def _group_name(pattern_base: int, item_index: int,
     return f"Chan#{item_index}", "channel"
 
 
+def _dominant_color(clips: list[ClipInfo]) -> Optional[int]:
+    """Return the most frequent non-None colour in the clip list, or None."""
+    counts: dict[int, int] = {}
+    for c in clips:
+        if c.color is not None:
+            counts[c.color] = counts.get(c.color, 0) + 1
+    if not counts:
+        return None
+    # Highest count wins; if tie, the lowest RGB value wins (deterministic)
+    return max(counts.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+
+
+def _rgb_to_hue_key(rgb: Optional[int]) -> tuple[int, float, float]:
+    """Convert a 0xRRGGBB colour to a sort key that produces a perceptual
+    rainbow order (red → orange → yellow → green → cyan → blue → magenta).
+    Greys and blacks (low saturation) go at the end.
+
+    Returns (bucket, hue, brightness) where:
+        bucket = 0 for coloured values, 1 for greys (sorted last)
+        hue    = 0-360 degree wheel position
+        brightness = tiebreaker within the same hue
+    """
+    if rgb is None:
+        return (2, 0.0, 0.0)   # no colour info -> absolute last
+    r = ((rgb >> 16) & 0xFF) / 255.0
+    g = ((rgb >> 8)  & 0xFF) / 255.0
+    b = ( rgb        & 0xFF) / 255.0
+    mx = max(r, g, b)
+    mn = min(r, g, b)
+    delta = mx - mn
+    # Saturation used to separate greys from colours
+    sat = 0 if mx == 0 else delta / mx
+
+    if delta < 1e-6 or sat < 0.1:
+        # Grey: bucket 1, sorted by brightness
+        return (1, 0.0, mx)
+
+    if mx == r:
+        h = ((g - b) / delta) % 6
+    elif mx == g:
+        h = (b - r) / delta + 2
+    else:
+        h = (r - g) / delta + 4
+    hue_deg = h * 60.0
+    return (0, hue_deg, mx)
+
+
 def _assign_lanes(clips: list[ClipInfo], base_track_0: int) -> int:
     """Classic lane-assignment. Mutates each clip's .new_track (1-based).
     Returns the number of lanes used.
@@ -227,7 +277,9 @@ def analyze(flp_path: Path | str,
               order. Available modifiers:
                 SUB_BY_LENGTH - groups with longer average clip length first
                 SUB_BY_TYPE   - audio clips first, then patterns
-                SUB_BY_COLOR  - (reserved for future; currently no-op)
+                SUB_BY_COLOR  - groups ordered by perceptual rainbow hue
+                                (red → orange → yellow → green → blue → purple).
+                                Greys and uncoloured groups go at the end.
     """
     path = Path(flp_path)
     data = path.read_bytes()
@@ -286,7 +338,8 @@ def analyze(flp_path: Path | str,
 
         elif evt_id == ID_CHANNEL_NEW:
             cur_ch = struct.unpack("<H", payload)[0]
-            channels.setdefault(cur_ch, {"name": None, "sample_path": None, "default_name": None})
+            channels.setdefault(cur_ch, {"name": None, "sample_path": None,
+                                          "default_name": None, "color": None})
 
         elif evt_id == ID_CHANNEL_NAME and cur_ch is not None:
             channels[cur_ch]["name"] = _decode_str(payload, is_unicode)
@@ -298,12 +351,19 @@ def analyze(flp_path: Path | str,
             if not channels[cur_ch].get("default_name"):
                 channels[cur_ch]["default_name"] = _decode_str(payload, is_unicode)
 
+        elif evt_id == ID_CHANNEL_COLOR and cur_ch is not None:
+            # 4-byte DWORD, low 24 bits are RGB (0x00RRGGBB, alpha unused)
+            channels[cur_ch]["color"] = struct.unpack("<I", payload)[0] & 0xFFFFFF
+
         elif evt_id == ID_PATTERN_NEW:
             cur_pat = struct.unpack("<H", payload)[0]
-            patterns.setdefault(cur_pat, {"name": None})
+            patterns.setdefault(cur_pat, {"name": None, "color": None})
 
         elif evt_id == ID_PATTERN_NAME and cur_pat is not None:
             patterns[cur_pat]["name"] = _decode_str(payload, is_unicode)
+
+        elif evt_id == ID_PATTERN_COLOR and cur_pat is not None:
+            patterns[cur_pat]["color"] = struct.unpack("<I", payload)[0] & 0xFFFFFF
 
         elif evt_id == ID_ARRANGEMENT_NEW:
             iid = struct.unpack("<H", payload)[0]
@@ -372,10 +432,16 @@ def analyze(flp_path: Path | str,
             name, kind = _group_name(pattern_base, item_index, channels, patterns)
             if name is None:
                 continue
+            # Look up source colour
+            if kind == "channel":
+                src_color = channels.get(item_index, {}).get("color")
+            else:
+                src_color = patterns.get(item_index - PATTERN_BASE_VAL, {}).get("color")
             clip = ClipInfo(
                 name=name, kind=kind,
                 position=position, length=length,
                 old_track=(MAX_TRACKS - 1 - rvidx) + 1,  # 1-based
+                color=src_color,
                 item_offset=base,
                 rvidx_offset=base + 12,
                 old_rvidx=rvidx,
@@ -411,9 +477,10 @@ def analyze(flp_path: Path | str,
                     most_common_kind = clips_in_group[0].kind  # clips in a group share name
                     key.append(0 if most_common_kind == "channel" else 1)
                 elif modifier == SUB_BY_COLOR:
-                    # No-op for now; color parsing not yet available.
-                    # Kept in the API so the GUI checkbox is future-proof.
-                    pass
+                    # Perceptual rainbow ordering based on the dominant color
+                    # in the group (majority wins among source channels/patterns)
+                    dom = _dominant_color(clips_in_group)
+                    key.append(_rgb_to_hue_key(dom))
             return tuple(key)
 
         # If there is no sub-sort, the behaviour is identical to before
@@ -441,8 +508,9 @@ def analyze(flp_path: Path | str,
                         avg_len = sum(c.length for c in clips_in_group) / len(clips_in_group)
                         parts.append(-avg_len)
                     elif modifier == SUB_BY_COLOR:
-                        # Placeholder: all groups share colour bucket 0
-                        parts.append(0)
+                        # Dominant color of the group, sorted by hue
+                        dom = _dominant_color(clips_in_group)
+                        parts.append(_rgb_to_hue_key(dom))
                 # Primary sort added last -> becomes the innermost ordering
                 parts.append(primary_key(group_name))
                 return tuple(parts)
