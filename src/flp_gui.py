@@ -31,7 +31,7 @@ from translations import t, LANGUAGES, DEFAULT_LANG
 
 
 APP_NAME = "FLP Organizer"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 AUTHOR = "Matt Danieli"
 PAYPAL_URL = "https://paypal.me/mattdanieli"
 BATCH_LIMIT = 30
@@ -527,7 +527,7 @@ class FlpOrganizerApp:
             command=self._on_sort_changed,
         )
         self.sub_color_cb.pack(anchor="w")
-        self.sub_color_cb.state(["disabled"])   # coming soon
+        # sub_color is now enabled in v1.4.0
 
         # Right column: Post-process options + batch output dir
         right_col = ttk.Frame(controls_card, style="Panel.TFrame")
