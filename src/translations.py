@@ -154,12 +154,12 @@ _translations: Dict[str, Dict[str, str]] = {
         "ru": "Сортировать по длине (длинные первыми)",
     },
     "sub_by_color": {
-        "en": "Sort by color (coming soon)",
-        "de": "Nach Farbe sortieren (in Kürze)",
-        "es": "Ordenar por color (próximamente)",
-        "fr": "Trier par couleur (bientôt)",
-        "it": "Ordina per colore (in arrivo)",
-        "ru": "Сортировать по цвету (скоро)",
+        "en": "Sort by color (hue: red → purple)",
+        "de": "Nach Farbe sortieren (Farbton: Rot → Violett)",
+        "es": "Ordenar por color (matiz: rojo → violeta)",
+        "fr": "Trier par couleur (teinte : rouge → violet)",
+        "it": "Ordina per colore (tinta: rosso → viola)",
+        "ru": "Сортировать по цвету (оттенок: красный → фиолетовый)",
     },
 
     # --- Post-process checkboxes ---
