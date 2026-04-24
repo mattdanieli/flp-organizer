@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-04-21
+
+### Added
+- **Sort by color** — new sub-sort modifier that orders groups by a
+  perceptual rainbow hue (red → orange → yellow → green → blue → purple).
+  Greys go in the middle, uncoloured groups at the end.
+- The color of a group is the most frequent color among its source
+  channels or patterns (majority wins).
+- Core now parses `ID_CHANNEL_COLOR` (event 128) and `ID_PATTERN_COLOR`
+  (event 149). `ClipInfo` exposes a new `color` field.
+- CLI: `--sub-color` is now fully functional.
+
+### Roadmap (coming in v1.5.0)
+- Auto-rename tracks from group names
+- Auto-color tracks
+- Remove empty tracks
+- Preserve muted track state (strada B from v1.3.x discussion)
+
 ## [1.3.1] - 2026-04-21
 
 ### Fixed
