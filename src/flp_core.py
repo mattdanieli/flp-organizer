@@ -47,6 +47,20 @@ ID_TRACK_DATA       = DATA_BASE + 30         # 238
 ID_CHANNEL_COLOR    = DWORD_BASE + 0         # 128 - channel colour, 4 bytes 0x00RRGGBB
 ID_PATTERN_COLOR    = DWORD_BASE + 21        # 149 - pattern colour (tentative)
 
+# Byte offset inside the ID_TRACK_DATA payload where the "enabled" byte lives.
+# Reverse-engineered on FL 25.1.6: byte 12 = 0x01 (active) / 0x00 (muted).
+TRACK_DATA_MUTE_OFFSET = 12
+
+# Byte offset inside a single 80-byte playlist item where the clip's
+# "muted" flag bit lives. Reverse-engineered on FL 25.1.6: bit 5 (0x20) of
+# byte 19 is set when the clip is individually muted (ghost/X).
+CLIP_ITEM_FLAGS_OFFSET = 19
+CLIP_MUTED_BIT = 0x20
+
+# Byte offsets inside the ID_TRACK_DATA payload for the track colour (3 bytes).
+# Bytes 4-6 = RGB (0xRR 0xGG 0xBB).
+TRACK_DATA_COLOR_OFFSET = 4    # first of 3 RGB bytes
+
 PATTERN_BASE_VAL = 20480   # item_index > PATTERN_BASE_VAL => pattern clip
 MAX_TRACKS = 500           # FL Studio 21+ has 500 playlist tracks
 
@@ -74,10 +88,13 @@ class ClipInfo:
     old_track: int              # Original track, 1-based
     new_track: int = 0          # Assigned track, 1-based
     color: Optional[int] = None  # 24-bit RGB of source channel/pattern (0xRRGGBB) or None
+    was_muted: bool = False      # True if source track was muted in the original file
+    was_clip_muted: bool = False # True if the clip itself was individually muted (ghost)
     # Byte offsets in the file (used by the writer)
     item_offset: int = 0
     rvidx_offset: int = 0
     old_rvidx: int = 0
+    clip_mute_offset: int = 0    # absolute file offset of the clip's mute-flag byte (item_offset + 19)
 
 
 @dataclass
@@ -103,6 +120,15 @@ class AnalysisResult:
     # Internal: for the writer
     _data: bytes = b""
     _patches: list[tuple[int, int]] = field(default_factory=list)  # (offset, new_rvidx)
+    # Mute patches: list of (absolute_byte_offset, new_value) to write into TRACK_DATA.
+    # new_value is 0x01 (active) or 0x00 (muted).
+    _mute_patches: list[tuple[int, int]] = field(default_factory=list)
+    # Colour patches: same form (absolute_offset, new_byte_value).
+    _color_patches: list[tuple[int, int]] = field(default_factory=list)
+    # Track-name inserts: list of (insert_at_offset, bytes_to_insert).
+    # Applied after all byte-level patches. Each insert grows the file by
+    # len(bytes_to_insert). The FLdt chunk size is updated accordingly.
+    _name_inserts: list[tuple[int, bytes]] = field(default_factory=list)
 
 
 # ----- Low-level parsing helpers -----
@@ -264,7 +290,9 @@ SORT_ALPHABETICAL_OLD = "alphabetical"  # legacy alias kept for compatibility
 
 def analyze(flp_path: Path | str,
             sort_mode: str = SORT_ALPHABETICAL,
-            sub_sort: Optional[list[str]] = None) -> AnalysisResult:
+            sub_sort: Optional[list[str]] = None,
+            apply_auto_color: bool = False,
+            apply_auto_rename: bool = False) -> AnalysisResult:
     """Parse the .flp file and compute the grouping plan. Does not modify anything.
 
     sort_mode:
@@ -307,6 +335,10 @@ def analyze(flp_path: Path | str,
     cur_pat: Optional[int] = None
     cur_arr: Optional[dict] = None
     cur_track_idx = -1
+    # Per-arrangement mapping: cur_track_idx -> {"mute_off", "color_off", "override_off", "mute_val", "color"}
+    track_info_state: dict[int, dict] = {}
+    # Last seen ID 43 event (track colour override flag) before a TRACK_DATA
+    last_43_offset: Optional[int] = None
 
     while pos < end:
         evt_id = data[pos]
@@ -389,6 +421,27 @@ def analyze(flp_path: Path | str,
 
         elif evt_id == ID_TRACK_DATA:
             cur_track_idx += 1
+            # Record the original "enabled" byte (1=active, 0=muted), colour,
+            # and the offset of the preceding "colour override enabled" flag
+            # (event ID 43). The writer uses these to restore mute state,
+            # apply auto-colour, etc.
+            if payload_size > TRACK_DATA_MUTE_OFFSET:
+                info = {
+                    "mute_off": payload_start + TRACK_DATA_MUTE_OFFSET,
+                    "mute_val": data[payload_start + TRACK_DATA_MUTE_OFFSET],
+                    "color_off": payload_start + TRACK_DATA_COLOR_OFFSET,
+                    "color_val": (data[payload_start + TRACK_DATA_COLOR_OFFSET] << 16) |
+                                 (data[payload_start + TRACK_DATA_COLOR_OFFSET + 1] << 8) |
+                                 data[payload_start + TRACK_DATA_COLOR_OFFSET + 2],
+                    "override_off": last_43_offset,
+                }
+                track_info_state[cur_track_idx] = info
+
+        elif evt_id == 43:
+            # Byte-sized event. This is the "use custom track colour" flag
+            # which precedes each TRACK_DATA. Remember its payload offset so
+            # a later writer can flip it to 0x01 to activate custom colours.
+            last_43_offset = payload_start
 
         elif evt_id == ID_TRACK_NAME and cur_arr is not None and cur_track_idx >= 0:
             # track name -- currently not used, but could be useful later
@@ -437,96 +490,185 @@ def analyze(flp_path: Path | str,
                 src_color = channels.get(item_index, {}).get("color")
             else:
                 src_color = patterns.get(item_index - PATTERN_BASE_VAL, {}).get("color")
+            old_track_1based = (MAX_TRACKS - 1 - rvidx) + 1  # 1-based
+            info = track_info_state.get(old_track_1based - 1)
+            was_muted_flag = bool(info and info["mute_val"] == 0)
+            # Clip-level mute: bit 5 of byte 19
+            clip_flags_byte_abs = base + CLIP_ITEM_FLAGS_OFFSET
+            clip_flags = data[clip_flags_byte_abs]
+            was_clip_muted_flag = bool(clip_flags & CLIP_MUTED_BIT)
             clip = ClipInfo(
                 name=name, kind=kind,
                 position=position, length=length,
-                old_track=(MAX_TRACKS - 1 - rvidx) + 1,  # 1-based
+                old_track=old_track_1based,
                 color=src_color,
+                was_muted=was_muted_flag,
+                was_clip_muted=was_clip_muted_flag,
                 item_offset=base,
                 rvidx_offset=base + 12,
                 old_rvidx=rvidx,
+                clip_mute_offset=clip_flags_byte_abs,
             )
             arr_clips.append(clip)
 
         # Group by name
-        groups: dict[str, list[ClipInfo]] = defaultdict(list)
-        for c in arr_clips:
-            groups[c.name].append(c)
+        # ---------- Split clips into two pools based on original track mute state ----------
+        # This is the "preserve muted tracks" feature: clips that came from
+        # muted tracks stay in a separate group of tracks at the bottom, which
+        # will be set to muted in the output. Clips from active tracks fill
+        # the tracks on top (which will be set to active).
+        active_clips = [c for c in arr_clips if not c.was_muted]
+        muted_clips  = [c for c in arr_clips if c.was_muted]
 
-        # ---------- Compute the ordering of groups ----------
-        # Build the primary sort key per group
-        def primary_key(group_name: str):
-            clips_in_group = groups[group_name]
-            if sort_mode == SORT_BY_FIRST_APPEARANCE:
-                return min(c.position for c in clips_in_group)
-            # Alphabetical - case-insensitive. Use the name itself as key.
-            return group_name.lower()
+        def build_groups_and_order(clip_list: list[ClipInfo]):
+            g: dict[str, list[ClipInfo]] = defaultdict(list)
+            for c in clip_list:
+                g[c.name].append(c)
 
-        # Build the sub-sort composite key (applied as tie-breaker AND also
-        # used to re-group within the primary order)
-        def composite_key(group_name: str):
-            clips_in_group = groups[group_name]
-            key = [primary_key(group_name)]
-            for modifier in (sub_sort or []):
-                if modifier == SUB_BY_LENGTH:
-                    # Longer average length first — negate for ascending sort
-                    avg_len = sum(c.length for c in clips_in_group) / len(clips_in_group)
-                    key.append(-avg_len)
-                elif modifier == SUB_BY_TYPE:
-                    # Channel (audio) = 0, pattern = 1  → audio goes first
-                    most_common_kind = clips_in_group[0].kind  # clips in a group share name
-                    key.append(0 if most_common_kind == "channel" else 1)
-                elif modifier == SUB_BY_COLOR:
-                    # Perceptual rainbow ordering based on the dominant color
-                    # in the group (majority wins among source channels/patterns)
-                    dom = _dominant_color(clips_in_group)
-                    key.append(_rgb_to_hue_key(dom))
-            return tuple(key)
+            def _primary(nm: str):
+                if sort_mode == SORT_BY_FIRST_APPEARANCE:
+                    return min(c.position for c in g[nm])
+                return nm.lower()
 
-        # If there is no sub-sort, the behaviour is identical to before
-        if not sub_sort:
-            if sort_mode == SORT_BY_FIRST_APPEARANCE:
-                sorted_names = sorted(groups.keys(),
-                                      key=lambda n: min(c.position for c in groups[n]))
-            else:
-                sorted_names = sorted(groups.keys(), key=lambda s: s.lower())
-        else:
-            # With sub-sort: the composite key decides the order. The sub-sort
-            # acts as BOTH a tie-breaker AND a grouping criterion — for example
-            # "Alphabetical + By type" produces all audio names A-Z first, then
-            # all pattern names A-Z.
-            # To do this we reverse the order: apply sub-sort modifiers first,
-            # then primary. That way groups with the same sub-sort key stay
-            # contiguous and are internally sorted by the primary key.
-            def grouping_key(group_name: str):
-                clips_in_group = groups[group_name]
+            if not sub_sort:
+                if sort_mode == SORT_BY_FIRST_APPEARANCE:
+                    order = sorted(g.keys(),
+                                   key=lambda n: min(c.position for c in g[n]))
+                else:
+                    order = sorted(g.keys(), key=lambda s: s.lower())
+                return order, g
+
+            def _grouping_key(nm: str):
+                cl = g[nm]
                 parts = []
                 for modifier in sub_sort:
                     if modifier == SUB_BY_TYPE:
-                        parts.append(0 if clips_in_group[0].kind == "channel" else 1)
+                        parts.append(0 if cl[0].kind == "channel" else 1)
                     elif modifier == SUB_BY_LENGTH:
-                        avg_len = sum(c.length for c in clips_in_group) / len(clips_in_group)
+                        avg_len = sum(c.length for c in cl) / len(cl)
                         parts.append(-avg_len)
                     elif modifier == SUB_BY_COLOR:
-                        # Dominant color of the group, sorted by hue
-                        dom = _dominant_color(clips_in_group)
+                        dom = _dominant_color(cl)
                         parts.append(_rgb_to_hue_key(dom))
-                # Primary sort added last -> becomes the innermost ordering
-                parts.append(primary_key(group_name))
+                parts.append(_primary(nm))
                 return tuple(parts)
+            return sorted(g.keys(), key=_grouping_key), g
 
-            sorted_names = sorted(groups.keys(), key=grouping_key)
+        active_order, active_groups = build_groups_and_order(active_clips)
+        muted_order,  muted_groups  = build_groups_and_order(muted_clips)
+
+        # Build a map from destination track (0-based) -> dominant color and group name
+        # Active zone first, then muted zone. Also remember which was muted.
+        dest_track_info: dict[int, dict] = {}
         base_track_0 = 0
-        for name in sorted_names:
-            group_clips = groups[name]
-            used = _assign_lanes(group_clips, base_track_0)
-            result.groups.append(GroupPlan(
-                name=name,
-                first_track=base_track_0 + 1,
-                lanes_used=used,
-                clip_count=len(group_clips),
-            ))
-            base_track_0 += used
+        muted_zone_start = None
+
+        def _lay_out(order, groups_dict, muted_flag: bool):
+            nonlocal base_track_0
+            for name in order:
+                group_clips = groups_dict[name]
+                first_track_0 = base_track_0
+                used = _assign_lanes(group_clips, base_track_0)
+                dom = _dominant_color(group_clips)
+                # Associate color/name with each destination track (lanes)
+                for lane_0 in range(first_track_0, first_track_0 + used):
+                    dest_track_info[lane_0] = {
+                        "name": name,
+                        "color": dom,
+                        "muted": muted_flag,
+                    }
+                result.groups.append(GroupPlan(
+                    name=(f"[muted] {name}" if muted_flag else name),
+                    first_track=first_track_0 + 1,
+                    lanes_used=used,
+                    clip_count=len(group_clips),
+                ))
+                base_track_0 += used
+
+        # Lay out active pool first
+        _lay_out(active_order, active_groups, muted_flag=False)
+        # Remember boundary
+        muted_zone_start = base_track_0 if muted_order else None
+        # Lay out muted pool right after
+        _lay_out(muted_order, muted_groups, muted_flag=True)
+
+        last_used_track_0 = base_track_0   # exclusive
+
+        # ---------- Compute per-track patches ----------
+        # For each destination track index we know:
+        #   - Whether it's in the active zone or muted zone
+        #   - Which group (if any) lives on it, and thus its dominant colour
+        # We write:
+        #   1. The "enabled" byte (mute) -> restore correct state
+        #   2. The 3 colour bytes + the override flag -> auto-colour (opt-in)
+        for track_0, info in track_info_state.items():
+            dest = dest_track_info.get(track_0)
+            # --- mute byte ---
+            if dest is not None:
+                new_mute = 0x00 if dest["muted"] else 0x01
+            else:
+                # Track is unoccupied in the new layout — reset to active
+                new_mute = 0x01
+            if new_mute != data[info["mute_off"]]:
+                result._mute_patches.append((info["mute_off"], new_mute))
+
+            # --- colour bytes + override flag ---
+            # Only write colour patches if the feature is enabled (opt-in) and
+            # a destination group exists with a valid colour.
+            if apply_auto_color and dest is not None and dest["color"] is not None:
+                rgb = dest["color"]
+                r, g, b = (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
+                # Three colour bytes inside TRACK_DATA
+                off = info["color_off"]
+                if data[off] != r:
+                    result._color_patches.append((off, r))
+                if data[off + 1] != g:
+                    result._color_patches.append((off + 1, g))
+                if data[off + 2] != b:
+                    result._color_patches.append((off + 2, b))
+                # Override flag (ID 43) — set to 0x01 so FL honours the custom colour
+                ov_off = info.get("override_off")
+                if ov_off is not None and data[ov_off] != 0x01:
+                    result._color_patches.append((ov_off, 0x01))
+
+        # ---------- Auto-rename: insert ID_TRACK_NAME events after TRACK_DATA ----------
+        # Event 239 (ID_TRACK_NAME) is a TEXT-type event. Encoding:
+        #   1 byte  = 0xEF  (239)
+        #   varint  = payload length (in bytes)
+        #   payload = UTF-16LE encoded string, null-terminated (0x00 0x00)
+        # We insert one such event after the TRACK_DATA of each track that
+        # has a destination group, using the group name as the new track name.
+        if apply_auto_rename:
+            for track_0, info in track_info_state.items():
+                dest = dest_track_info.get(track_0)
+                if dest is None:
+                    continue
+                # Strip any "coming soon" prefixes like "[muted]"
+                new_name = dest["name"]
+                # Clip to a reasonable length so FL Studio doesn't choke
+                new_name = new_name[:120]
+                # UTF-16LE encode + null terminator (2 bytes of 0x00)
+                name_bytes = new_name.encode("utf-16-le") + b"\x00\x00"
+                # Build event: 0xEF + varint_len + name_bytes
+                evt_bytes = bytearray([ID_TRACK_NAME])
+                # Varint encoding of length
+                n = len(name_bytes)
+                while True:
+                    byte = n & 0x7F
+                    n >>= 7
+                    if n:
+                        evt_bytes.append(byte | 0x80)
+                    else:
+                        evt_bytes.append(byte)
+                        break
+                evt_bytes.extend(name_bytes)
+                # Insert position: right after the TRACK_DATA payload ends.
+                # TRACK_DATA payload ends at mute_off + (70 - 12) = mute_off + 58
+                # But more robustly: the TRACK_DATA payload length is 70, so
+                # end = payload_start + 70.
+                payload_start = info["mute_off"] - TRACK_DATA_MUTE_OFFSET
+                insert_at = payload_start + 70
+                result._name_inserts.append((insert_at, bytes(evt_bytes)))
 
         if base_track_0 > MAX_TRACKS:
             result.warnings.append(
@@ -554,19 +696,67 @@ def apply_plan(result: AnalysisResult, output_path: Path | str,
                progress: Optional[Callable[[int, int], None]] = None) -> None:
     """Writes the reorganized file using the patches computed by analyze()."""
     out = bytearray(result._data)
-    total = len(result._patches)
-    for i, (offset, new_rvidx) in enumerate(result._patches):
+    total = (len(result._patches) + len(result._mute_patches)
+             + len(result._color_patches) + len(result._name_inserts))
+    step = 0
+
+    # 1) Clip-to-track index patches
+    for offset, new_rvidx in result._patches:
         struct.pack_into("<H", out, offset, new_rvidx)
-        if progress and (i % 50 == 0 or i == total - 1):
-            progress(i + 1, total)
+        step += 1
+        if progress and (step % 50 == 0 or step == total):
+            progress(step, total)
+
+    # 2) Track mute-state patches (preserve muted tracks)
+    for offset, new_value in result._mute_patches:
+        out[offset] = new_value
+        step += 1
+        if progress and (step % 20 == 0 or step == total):
+            progress(step, total)
+
+    # 3) Track colour patches (auto-colour)
+    for offset, new_value in result._color_patches:
+        out[offset] = new_value
+        step += 1
+        if progress and (step % 20 == 0 or step == total):
+            progress(step, total)
+
+    # 4) Track-name inserts (auto-rename)
+    # These GROW the file; we apply them in reverse offset order so that
+    # earlier offsets remain valid while we splice.
+    if result._name_inserts:
+        # Build a new bytearray by splicing in the new events in reverse order
+        inserts_sorted = sorted(result._name_inserts, key=lambda x: x[0], reverse=True)
+        total_inserted = sum(len(b) for _, b in inserts_sorted)
+        for insert_at, payload in inserts_sorted:
+            out[insert_at:insert_at] = payload
+            step += 1
+            if progress and (step % 20 == 0 or step == total):
+                progress(step, total)
+        # Update the FLdt chunk size in the header so FL Studio knows the new
+        # data length. FLdt size is a little-endian uint32 at offset 4 of the
+        # FLdt chunk header (which itself starts after the FLhd chunk).
+        # Find FLdt marker.
+        pos = 0
+        assert out[:4] == b'FLhd'
+        hdr_size = struct.unpack_from("<I", out, 4)[0]
+        fldt_pos = 8 + hdr_size
+        assert out[fldt_pos:fldt_pos+4] == b'FLdt'
+        old_size = struct.unpack_from("<I", out, fldt_pos + 4)[0]
+        struct.pack_into("<I", out, fldt_pos + 4, old_size + total_inserted)
+
     Path(output_path).write_bytes(bytes(out))
 
 
 def reorganize(flp_path: Path | str, output_path: Path | str,
                progress: Optional[Callable[[int, int], None]] = None,
                sort_mode: str = SORT_ALPHABETICAL,
-               sub_sort: Optional[list[str]] = None) -> AnalysisResult:
+               sub_sort: Optional[list[str]] = None,
+               apply_auto_color: bool = False,
+               apply_auto_rename: bool = False) -> AnalysisResult:
     """One-shot: analyze + write. Returns the AnalysisResult."""
-    result = analyze(flp_path, sort_mode=sort_mode, sub_sort=sub_sort)
+    result = analyze(flp_path, sort_mode=sort_mode, sub_sort=sub_sort,
+                     apply_auto_color=apply_auto_color,
+                     apply_auto_rename=apply_auto_rename)
     apply_plan(result, output_path, progress=progress)
     return result
