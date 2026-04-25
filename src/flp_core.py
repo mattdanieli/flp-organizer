@@ -126,6 +126,10 @@ class AnalysisResult:
     _mute_patches: list[tuple[int, int]] = field(default_factory=list)
     # Colour patches: same form (absolute_offset, new_byte_value).
     _color_patches: list[tuple[int, int]] = field(default_factory=list)
+    # Colour-event inserts: list of (insert_at_offset, bytes_to_insert) for
+    # patterns/channels that don't already have a colour event. Applied like
+    # name inserts: file grows, FLdt size is updated.
+    _color_inserts: list[tuple[int, bytes]] = field(default_factory=list)
     # Track-name inserts: list of (insert_at_offset, bytes_to_insert).
     # Applied after all byte-level patches. Each insert grows the file by
     # len(bytes_to_insert). The FLdt chunk size is updated accordingly.
@@ -447,7 +451,13 @@ def analyze(flp_path: Path | str,
 
         elif evt_id == ID_PATTERN_NEW:
             cur_pat = struct.unpack("<H", payload)[0]
-            patterns.setdefault(cur_pat, {"name": None, "color": None, "color_offset": None})
+            patterns.setdefault(cur_pat, {"name": None, "color": None,
+                                           "color_offset": None,
+                                           "insert_color_at": None})
+            # Remember the byte right after this PATTERN_NEW event so a
+            # missing PATTERN_COLOR event can be inserted there.
+            # PATTERN_NEW (id 65) is a WORD-size event: 1 byte id + 2 bytes payload.
+            patterns[cur_pat]["insert_color_at"] = pos  # pos is already past the payload
 
         elif evt_id == ID_PATTERN_NAME and cur_pat is not None:
             patterns[cur_pat]["name"] = _decode_str(payload, is_unicode)
@@ -455,6 +465,8 @@ def analyze(flp_path: Path | str,
         elif evt_id == ID_PATTERN_COLOR and cur_pat is not None:
             patterns[cur_pat]["color"] = struct.unpack("<I", payload)[0] & 0xFFFFFF
             patterns[cur_pat]["color_offset"] = payload_start
+            # An existing color event makes the insert position obsolete
+            patterns[cur_pat]["insert_color_at"] = None
 
         elif evt_id == ID_ARRANGEMENT_NEW:
             iid = struct.unpack("<H", payload)[0]
@@ -753,16 +765,26 @@ def analyze(flp_path: Path | str,
                         pat_info = patterns.get(src_idx, {})
                         cur = pat_info.get("color")
                         off = pat_info.get("color_offset")
-                        if off is None:
-                            continue
-                        if cur is not None and not _is_default_color(cur):
-                            continue
-                        if data[off] != R:
-                            result._color_patches.append((off, R))
-                        if data[off + 1] != G:
-                            result._color_patches.append((off + 1, G))
-                        if data[off + 2] != B:
-                            result._color_patches.append((off + 2, B))
+                        if off is not None:
+                            # Pattern has an existing PATTERN_COLOR event we can patch
+                            if cur is not None and not _is_default_color(cur):
+                                continue
+                            if data[off] != R:
+                                result._color_patches.append((off, R))
+                            if data[off + 1] != G:
+                                result._color_patches.append((off + 1, G))
+                            if data[off + 2] != B:
+                                result._color_patches.append((off + 2, B))
+                        else:
+                            # Pattern has no PATTERN_COLOR event — insert one
+                            insert_at = pat_info.get("insert_color_at")
+                            if insert_at is None:
+                                continue
+                            # Build PATTERN_COLOR event:
+                            #   1 byte  = 0x95 (149) event id
+                            #   4 bytes = DWORD value 0x00BB GG RR (LE) -> bytes: B G R 00
+                            evt = bytes([149, B, G, R, 0])
+                            result._color_inserts.append((insert_at, evt))
 
         # ---------- Auto-rename: insert ID_TRACK_NAME events after TRACK_DATA ----------
         # Event 239 (ID_TRACK_NAME) is a TEXT-type event. Encoding:
@@ -830,7 +852,8 @@ def apply_plan(result: AnalysisResult, output_path: Path | str,
     """Writes the reorganized file using the patches computed by analyze()."""
     out = bytearray(result._data)
     total = (len(result._patches) + len(result._mute_patches)
-             + len(result._color_patches) + len(result._name_inserts))
+             + len(result._color_patches) + len(result._color_inserts)
+             + len(result._name_inserts))
     step = 0
 
     # 1) Clip-to-track index patches
@@ -854,12 +877,13 @@ def apply_plan(result: AnalysisResult, output_path: Path | str,
         if progress and (step % 20 == 0 or step == total):
             progress(step, total)
 
-    # 4) Track-name inserts (auto-rename)
+    # 4) Inserts (auto-color new pattern color events + auto-rename track names)
     # These GROW the file; we apply them in reverse offset order so that
     # earlier offsets remain valid while we splice.
-    if result._name_inserts:
+    all_inserts = list(result._color_inserts) + list(result._name_inserts)
+    if all_inserts:
         # Build a new bytearray by splicing in the new events in reverse order
-        inserts_sorted = sorted(result._name_inserts, key=lambda x: x[0], reverse=True)
+        inserts_sorted = sorted(all_inserts, key=lambda x: x[0], reverse=True)
         total_inserted = sum(len(b) for _, b in inserts_sorted)
         for insert_at, payload in inserts_sorted:
             out[insert_at:insert_at] = payload
@@ -869,7 +893,6 @@ def apply_plan(result: AnalysisResult, output_path: Path | str,
         # Update the FLdt chunk size in the header so FL Studio knows the new
         # data length. FLdt size is a little-endian uint32 at offset 4 of the
         # FLdt chunk header (which itself starts after the FLhd chunk).
-        # Find FLdt marker.
         pos = 0
         assert out[:4] == b'FLhd'
         hdr_size = struct.unpack_from("<I", out, 4)[0]
