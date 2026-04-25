@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.1] - 2026-04-25
+
+### Fixed
+- **Auto-color now actually applies to clips.** v1.5.0 wrote colour bytes
+  to the playlist tracks, but FL Studio doesn't reliably honour those
+  bytes (the override flag is missing for the very first track). v1.5.1
+  changes strategy: it writes a perceptually-distinct rainbow colour to
+  each group's source channels and patterns (`ID_CHANNEL_COLOR` event 128
+  and `ID_PATTERN_COLOR` event 149). Since clip colour in FL Studio comes
+  from the source channel/pattern, this is what users actually see.
+- Improved default-colour detection: a heuristic (`_is_default_color`)
+  identifies FL Studio's auto-assigned greys (low saturation and low
+  luminosity) so user-picked colours are preserved while drab defaults
+  get overwritten.
+
+### Other
+- All v1.5.0 features remain (preserve muted tracks, preserve clip-level
+  mute, auto-rename tracks). Only the auto-color implementation changed.
+
 ## [1.5.0] - 2026-04-25
 
 ### Added
