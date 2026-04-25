@@ -45,7 +45,7 @@ ID_ARRANGEMENT_NAME = TEXT_BASE + 49         # 241
 ID_PLAYLIST         = DATA_BASE + 25         # 233
 ID_TRACK_DATA       = DATA_BASE + 30         # 238
 ID_CHANNEL_COLOR    = DWORD_BASE + 0         # 128 - channel colour, 4 bytes 0x00RRGGBB
-ID_PATTERN_COLOR    = DWORD_BASE + 21        # 149 - pattern colour (tentative)
+ID_PATTERN_COLOR    = DWORD_BASE + 22        # 150 - pattern colour (verified on FL 25.1.6)
 
 # Byte offset inside the ID_TRACK_DATA payload where the "enabled" byte lives.
 # Reverse-engineered on FL 25.1.6: byte 12 = 0x01 (active) / 0x00 (muted).
@@ -60,6 +60,19 @@ CLIP_MUTED_BIT = 0x20
 # Byte offsets inside the ID_TRACK_DATA payload for the track colour (3 bytes).
 # Bytes 4-6 = RGB (0xRR 0xGG 0xBB).
 TRACK_DATA_COLOR_OFFSET = 4    # first of 3 RGB bytes
+
+
+def _decode_color_payload(payload: bytes) -> int:
+    """Decode a 4-byte color event payload into a 0xRRGGBB integer.
+
+    FL Studio stores colours as a 4-byte event payload where the bytes are,
+    in file order: R, G, B, alpha. As a little-endian DWORD this reads as
+    0x00BBGGRR which is NOT what we want for our internal 0xRRGGBB model.
+    This helper rebuilds the canonical 0xRRGGBB integer from the raw bytes.
+    """
+    if len(payload) < 3:
+        return 0
+    return (payload[0] << 16) | (payload[1] << 8) | payload[2]
 
 PATTERN_BASE_VAL = 20480   # item_index > PATTERN_BASE_VAL => pattern clip
 MAX_TRACKS = 500           # FL Studio 21+ has 500 playlist tracks
@@ -444,8 +457,8 @@ def analyze(flp_path: Path | str,
                 channels[cur_ch]["default_name"] = _decode_str(payload, is_unicode)
 
         elif evt_id == ID_CHANNEL_COLOR and cur_ch is not None:
-            # 4-byte DWORD, low 24 bits are RGB (0x00RRGGBB, alpha unused)
-            channels[cur_ch]["color"] = struct.unpack("<I", payload)[0] & 0xFFFFFF
+            # Decode 4-byte payload (R, G, B, alpha) into canonical 0xRRGGBB
+            channels[cur_ch]["color"] = _decode_color_payload(payload)
             # Remember offset so the writer can update the channel colour
             channels[cur_ch]["color_offset"] = payload_start
 
@@ -463,7 +476,7 @@ def analyze(flp_path: Path | str,
             patterns[cur_pat]["name"] = _decode_str(payload, is_unicode)
 
         elif evt_id == ID_PATTERN_COLOR and cur_pat is not None:
-            patterns[cur_pat]["color"] = struct.unpack("<I", payload)[0] & 0xFFFFFF
+            patterns[cur_pat]["color"] = _decode_color_payload(payload)
             patterns[cur_pat]["color_offset"] = payload_start
             # An existing color event makes the insert position obsolete
             patterns[cur_pat]["insert_color_at"] = None
@@ -781,9 +794,9 @@ def analyze(flp_path: Path | str,
                             if insert_at is None:
                                 continue
                             # Build PATTERN_COLOR event:
-                            #   1 byte  = 0x95 (149) event id
-                            #   4 bytes = DWORD value 0x00BB GG RR (LE) -> bytes: B G R 00
-                            evt = bytes([149, B, G, R, 0])
+                            #   1 byte  = 0x96 (150) event id
+                            #   4 bytes = R, G, B, alpha (alpha=0)
+                            evt = bytes([ID_PATTERN_COLOR, R, G, B, 0])
                             result._color_inserts.append((insert_at, evt))
 
         # ---------- Auto-rename: insert ID_TRACK_NAME events after TRACK_DATA ----------
