@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.5.0] - 2026-04-24
+## [1.5.0] - 2026-04-25
 
 ### Added
 - **Preserve muted tracks.** Clips from originally-muted tracks are placed
@@ -10,33 +10,32 @@ All notable changes to this project will be documented in this file.
   (labelled `[muted] ...` in the preview). Tracks that used to be muted but
   no longer contain muted content are reactivated automatically.
 - **Preserve individual clip mute (ghost clips).** The "X" marker on single
-  muted clips is preserved when those clips are moved to new tracks. This
-  works automatically (the clip mute bit lives inside the 80-byte playlist
-  item which is already moved intact).
-- **Auto-color tracks** (opt-in checkbox). Each destination track is coloured
-  with the dominant color of the group that lives on it (majority wins
-  among the source channel/pattern colors). The "custom colour" override
-  flag is also set so FL Studio honours the new colour.
+  muted clips is preserved when those clips are moved to new tracks.
+- **Auto-color (rainbow)** (opt-in checkbox). For each group, the source
+  channels and patterns get a perceptually-distinct rainbow colour. This
+  colours the **clips** in the playlist (because clip colour comes from the
+  source channel/pattern in FL Studio). Custom colours that the user has
+  manually picked are preserved — only auto-assigned default greys are
+  overwritten. (Note: this is different from colouring the playlist tracks
+  themselves, which FL Studio handles via a separate mechanism that proved
+  unreliable to write to.)
 - **Auto-rename tracks** (opt-in checkbox). Each destination track is
-  renamed to match the group name (e.g. `Kick Basic.wav` or `Pattern 24`).
-  This is implemented by inserting new `ID_TRACK_NAME` (event 239) entries
-  in the event stream right after each `ID_TRACK_DATA`. The FLdt chunk
-  size is updated to reflect the added bytes.
+  renamed to match its group (e.g. `Kick Basic.wav` or `Pattern 24`).
+  Implemented by inserting `ID_TRACK_NAME` (event 239) entries after each
+  `ID_TRACK_DATA` and updating the FLdt chunk size.
 
 ### Technical
 - Reverse-engineered on FL Studio 25.1.6:
   - Track mute: byte 12 of `ID_TRACK_DATA` payload (`0x01` active / `0x00` muted).
   - Clip mute: bit 5 (`0x20`) of byte 19 in the 80-byte playlist item.
-  - Track colour: bytes 4-6 of `ID_TRACK_DATA` payload (RGB). Byte-size
-    event ID 43 preceding TRACK_DATA is the "custom colour" override flag.
-  - Track name: dedicated `ID_TRACK_NAME` (239) text event with UTF-16LE
-    null-terminated string.
-- Writer now supports mute patches, colour patches, and name-event inserts
-  in a single pass. The file growth from name inserts is tracked and the
-  FLdt chunk header is updated correctly.
+  - Channel colour: `ID_CHANNEL_COLOR` (event 128), 4-byte DWORD `0x00RRGGBB`.
+  - Pattern colour: `ID_PATTERN_COLOR` (event 149), same layout.
+  - Track name: `ID_TRACK_NAME` (event 239), UTF-16LE null-terminated.
+- Heuristic `_is_default_color`: identifies FL Studio's auto-assigned greys
+  (R, G, B all under 0x70 with low spread) so user customisations are kept.
 
 ### Roadmap
-- **v1.6.0**: remove empty tracks, localisation improvements.
+- **v1.6.0**: remove empty tracks, custom colour palettes for groups.
 
 ## [1.4.0] - 2026-04-21
 
