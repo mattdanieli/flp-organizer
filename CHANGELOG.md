@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.3] - 2026-04-25
+
+### Fixed
+- **Pattern colour now actually applies in FL Studio.** v1.5.2 wrote
+  events with the wrong event ID (149 instead of 150) and with the byte
+  order reversed (B, G, R instead of R, G, B). These were inserted into
+  the file but FL Studio quietly ignored them. v1.5.3 uses the correct
+  event ID (`ID_PATTERN_COLOR = 150`) and the correct byte order
+  (R, G, B, alpha).
+- Added a `_decode_color_payload` helper so colour-event payloads are
+  consistently decoded as canonical `0xRRGGBB` integers regardless of
+  the file's little-endian byte order. Both `ID_CHANNEL_COLOR` (128)
+  and `ID_PATTERN_COLOR` (150) go through it.
+
+### Notes
+- Reverse-engineered with a tiny test project: a one-pattern .flp with
+  the pattern's colour set to `#7F0010` (Maroon) revealed the byte layout
+  `7F 00 10 00` at the right offset for event ID 0x96 (150). The
+  previous tentative ID (149) turned out to be a different DWORD-typed
+  event whose payload happens to look colour-like.
+
 ## [1.5.2] - 2026-04-25
 
 ### Fixed
