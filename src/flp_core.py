@@ -90,6 +90,7 @@ class ClipInfo:
     color: Optional[int] = None  # 24-bit RGB of source channel/pattern (0xRRGGBB) or None
     was_muted: bool = False      # True if source track was muted in the original file
     was_clip_muted: bool = False # True if the clip itself was individually muted (ghost)
+    _source_idx: Optional[int] = None  # Internal: source channel id or pattern id (0-based)
     # Byte offsets in the file (used by the writer)
     item_offset: int = 0
     rvidx_offset: int = 0
@@ -213,6 +214,61 @@ def _group_name(pattern_base: int, item_index: int,
     if dn:
         return dn, "channel"
     return f"Chan#{item_index}", "channel"
+
+
+def _is_default_color(rgb: int) -> bool:
+    """Heuristic: returns True for colours FL Studio auto-assigns to channels
+    that the user hasn't manually customized.
+
+    These are the dark, low-saturation greys (R, G, B all in roughly 0x10-0x60
+    range with low spread). User-picked colours have high saturation and/or
+    higher luminosity.
+    """
+    R = (rgb >> 16) & 0xFF
+    G = (rgb >> 8)  & 0xFF
+    B =  rgb        & 0xFF
+    # Very dark — probably default
+    if R < 0x70 and G < 0x70 and B < 0x70:
+        # Low saturation? compute max-min
+        spread = max(R, G, B) - min(R, G, B)
+        if spread < 0x40:   # less than 64 of variance between channels = grey-ish
+            return True
+    return False
+
+
+# Channel and pattern colours that FL Studio uses when nothing is set by
+# the user. Kept as exact set of well-known defaults; the heuristic in
+# _is_default_color extends this for cases like 0x39352f (auto-assigned greys).
+DEFAULT_CHANNEL_COLORS = {0x3c4043, 0x494742, 0x000000, 0x141414}
+DEFAULT_PATTERN_COLORS = {0x3c4043, 0x494742, 0x000000, 0x141414}
+
+
+def _hsv_to_rgb(h_deg: float, s: float, v: float) -> int:
+    """Convert HSV (h in degrees 0-360, s/v in 0-1) to a 24-bit RGB int 0xRRGGBB."""
+    h = (h_deg % 360.0) / 60.0
+    c = v * s
+    x = c * (1 - abs(h % 2 - 1))
+    m = v - c
+    if 0 <= h < 1:   r, g, b = c, x, 0
+    elif 1 <= h < 2: r, g, b = x, c, 0
+    elif 2 <= h < 3: r, g, b = 0, c, x
+    elif 3 <= h < 4: r, g, b = 0, x, c
+    elif 4 <= h < 5: r, g, b = x, 0, c
+    else:            r, g, b = c, 0, x
+    R = int(round((r + m) * 255))
+    G = int(round((g + m) * 255))
+    B = int(round((b + m) * 255))
+    return (R << 16) | (G << 8) | B
+
+
+def _rainbow_color_for(group_index: int, total_groups: int) -> int:
+    """Return a rainbow colour for the i-th group out of total_groups, 0xRRGGBB.
+    Uses HSV with hue spread evenly, mid-high saturation/value for visibility.
+    """
+    if total_groups <= 0:
+        return 0x808080
+    hue = (group_index * 360.0 / total_groups) % 360.0
+    return _hsv_to_rgb(hue, s=0.65, v=0.95)
 
 
 def _dominant_color(clips: list[ClipInfo]) -> Optional[int]:
@@ -386,16 +442,19 @@ def analyze(flp_path: Path | str,
         elif evt_id == ID_CHANNEL_COLOR and cur_ch is not None:
             # 4-byte DWORD, low 24 bits are RGB (0x00RRGGBB, alpha unused)
             channels[cur_ch]["color"] = struct.unpack("<I", payload)[0] & 0xFFFFFF
+            # Remember offset so the writer can update the channel colour
+            channels[cur_ch]["color_offset"] = payload_start
 
         elif evt_id == ID_PATTERN_NEW:
             cur_pat = struct.unpack("<H", payload)[0]
-            patterns.setdefault(cur_pat, {"name": None, "color": None})
+            patterns.setdefault(cur_pat, {"name": None, "color": None, "color_offset": None})
 
         elif evt_id == ID_PATTERN_NAME and cur_pat is not None:
             patterns[cur_pat]["name"] = _decode_str(payload, is_unicode)
 
         elif evt_id == ID_PATTERN_COLOR and cur_pat is not None:
             patterns[cur_pat]["color"] = struct.unpack("<I", payload)[0] & 0xFFFFFF
+            patterns[cur_pat]["color_offset"] = payload_start
 
         elif evt_id == ID_ARRANGEMENT_NEW:
             iid = struct.unpack("<H", payload)[0]
@@ -485,11 +544,13 @@ def analyze(flp_path: Path | str,
             name, kind = _group_name(pattern_base, item_index, channels, patterns)
             if name is None:
                 continue
-            # Look up source colour
+            # Look up source colour and source index
             if kind == "channel":
+                src_idx = item_index
                 src_color = channels.get(item_index, {}).get("color")
             else:
-                src_color = patterns.get(item_index - PATTERN_BASE_VAL, {}).get("color")
+                src_idx = item_index - PATTERN_BASE_VAL
+                src_color = patterns.get(src_idx, {}).get("color")
             old_track_1based = (MAX_TRACKS - 1 - rvidx) + 1  # 1-based
             info = track_info_state.get(old_track_1based - 1)
             was_muted_flag = bool(info and info["mute_val"] == 0)
@@ -504,6 +565,7 @@ def analyze(flp_path: Path | str,
                 color=src_color,
                 was_muted=was_muted_flag,
                 was_clip_muted=was_clip_muted_flag,
+                _source_idx=src_idx,
                 item_offset=base,
                 rvidx_offset=base + 12,
                 old_rvidx=rvidx,
@@ -612,24 +674,95 @@ def analyze(flp_path: Path | str,
             if new_mute != data[info["mute_off"]]:
                 result._mute_patches.append((info["mute_off"], new_mute))
 
-            # --- colour bytes + override flag ---
-            # Only write colour patches if the feature is enabled (opt-in) and
-            # a destination group exists with a valid colour.
-            if apply_auto_color and dest is not None and dest["color"] is not None:
-                rgb = dest["color"]
-                r, g, b = (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
-                # Three colour bytes inside TRACK_DATA
-                off = info["color_off"]
-                if data[off] != r:
-                    result._color_patches.append((off, r))
-                if data[off + 1] != g:
-                    result._color_patches.append((off + 1, g))
-                if data[off + 2] != b:
-                    result._color_patches.append((off + 2, b))
-                # Override flag (ID 43) — set to 0x01 so FL honours the custom colour
-                ov_off = info.get("override_off")
-                if ov_off is not None and data[ov_off] != 0x01:
-                    result._color_patches.append((ov_off, 0x01))
+            # --- track colour bytes are NOT written anymore ---
+            # FL Studio doesn't reliably honour the per-track colour bytes
+            # we used to write here (the override flag isn't always present
+            # for the very first track). Auto-colour now operates on the
+            # source channels/patterns instead — see the block below.
+
+        # ---------- Auto-color (rainbow): paint each group's source channels/patterns ----------
+        # Strategy:
+        #   1. Order groups in the same order as result.groups (organized order).
+        #   2. Assign a rainbow hue to each group based on its position.
+        #   3. For every channel/pattern that contributes a clip to that group,
+        #      overwrite its ID_CHANNEL_COLOR (event 128) or ID_PATTERN_COLOR
+        #      (event 149) with the rainbow colour — but ONLY if it's currently
+        #      a default/unset colour, so user-set custom colours are preserved.
+        if apply_auto_color and result.groups:
+            # Map group_name -> set of (kind, item_index) sources
+            group_sources: dict[str, set[tuple[str, int]]] = defaultdict(set)
+            # Map (kind, item_index) -> the parsed channels/patterns dict info
+            for cl in arr_clips:
+                # Reverse-engineer the source: clips with kind == 'channel' map
+                # to a channel id; 'pattern' clips map to (item_index - 0x5000)
+                # which is the pattern's logical id. We don't have item_index
+                # cached here easily, but we DO have the source colour and the
+                # channels/patterns dicts from the parser.
+                pass  # We fill this map below using a different approach
+
+            # Simpler: walk the clips again and use channel/pattern dicts
+            # directly. Note: we need to know whether a clip name corresponds
+            # to a channel or a pattern; ClipInfo.kind tells us that.
+            for cl in arr_clips:
+                # We need the source id. Reconstruct it from clip context:
+                # in the original parsing the source was identified by either
+                # the channel id (item_index) or pattern id. ClipInfo doesn't
+                # carry item_index, so we infer from kind+name+color.
+                # The simpler path: any channel/pattern whose colour matches
+                # cl.color belongs to this group's potential sources. But we
+                # actually want the *exact* source. Use: cl.kind tells channel
+                # vs pattern, and we match by colour OR fall back to "any".
+                # For correctness, store item_index in ClipInfo (next step).
+                pass
+
+            # Use the pre-stored mapping: see below where we set
+            # cl._source_idx during parsing.
+            # Strip the [muted] prefix to match against arr_clips names
+            ordered_group_names = []
+            for g in result.groups:
+                clean_name = g.name[len("[muted] "):] if g.name.startswith("[muted] ") else g.name
+                ordered_group_names.append(clean_name)
+            total_groups = len(ordered_group_names)
+
+            # Collect source ids per group name
+            for cl in arr_clips:
+                if hasattr(cl, "_source_idx") and cl._source_idx is not None:
+                    group_sources[cl.name].add((cl.kind, cl._source_idx))
+
+            for group_pos, gname in enumerate(ordered_group_names):
+                rainbow = _rainbow_color_for(group_pos, total_groups)
+                R, G, B = (rainbow >> 16) & 0xFF, (rainbow >> 8) & 0xFF, rainbow & 0xFF
+                for kind, src_idx in group_sources.get(gname, set()):
+                    if kind == "channel":
+                        ch_info = channels.get(src_idx, {})
+                        cur = ch_info.get("color")
+                        off = ch_info.get("color_offset")
+                        if off is None:
+                            continue   # Channel never had a colour event we can patch
+                        if cur is not None and not _is_default_color(cur):
+                            continue   # User picked a custom colour — preserve it
+                        # Write 4 bytes (R,G,B,0x00) at off
+                        if data[off] != R:
+                            result._color_patches.append((off, R))
+                        if data[off + 1] != G:
+                            result._color_patches.append((off + 1, G))
+                        if data[off + 2] != B:
+                            result._color_patches.append((off + 2, B))
+                        # 4th byte stays 0x00 (alpha)
+                    else:  # pattern
+                        pat_info = patterns.get(src_idx, {})
+                        cur = pat_info.get("color")
+                        off = pat_info.get("color_offset")
+                        if off is None:
+                            continue
+                        if cur is not None and not _is_default_color(cur):
+                            continue
+                        if data[off] != R:
+                            result._color_patches.append((off, R))
+                        if data[off + 1] != G:
+                            result._color_patches.append((off + 1, G))
+                        if data[off + 2] != B:
+                            result._color_patches.append((off + 2, B))
 
         # ---------- Auto-rename: insert ID_TRACK_NAME events after TRACK_DATA ----------
         # Event 239 (ID_TRACK_NAME) is a TEXT-type event. Encoding:
