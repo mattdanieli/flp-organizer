@@ -34,15 +34,56 @@ jobs:
             --hidden-import tkinterdnd2 `
             --paths src src/flp_gui.py
 
-      - name: Upload artifact
+      - name: Determine version string
+        id: version
+        shell: pwsh
+        run: |
+          # Extract version number from tag (e.g. "v1.5.0" -> "1.5.0").
+          # If running outside a tag (workflow_dispatch), use "dev".
+          $ref = "${{ github.ref }}"
+          if ($ref -like "refs/tags/v*") {
+            $version = $ref -replace "refs/tags/v", ""
+          } else {
+            $version = "dev"
+          }
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "Version detected: $version"
+
+      - name: Rename executable with version
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          Copy-Item "dist/FLPOrganizer.exe" "dist/FLPOrganizer-$version.exe"
+
+      - name: Build release zip
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $stagingDir = "release-staging"
+          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+          # Copy items into the staging folder
+          Copy-Item "dist/FLPOrganizer-$version.exe" "$stagingDir/"
+          Copy-Item "README.md" "$stagingDir/" -ErrorAction SilentlyContinue
+          Copy-Item "LICENSE" "$stagingDir/" -ErrorAction SilentlyContinue
+          Copy-Item "CHANGELOG.md" "$stagingDir/" -ErrorAction SilentlyContinue
+          # Compress
+          $zipName = "FLPOrganizer-$version-windows.zip"
+          Compress-Archive -Path "$stagingDir/*" -DestinationPath "dist/$zipName" -Force
+          echo "Created: dist/$zipName"
+
+      - name: Upload artifact (CI / non-tag runs)
         uses: actions/upload-artifact@v4
         with:
           name: FLPOrganizer-windows
-          path: dist/FLPOrganizer.exe
+          path: |
+            dist/FLPOrganizer-*.exe
+            dist/FLPOrganizer-*-windows.zip
 
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/FLPOrganizer.exe
+          files: |
+            dist/FLPOrganizer-*.exe
+            dist/FLPOrganizer-*-windows.zip
           generate_release_notes: true
