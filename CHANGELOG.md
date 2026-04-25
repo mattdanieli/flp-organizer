@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.2] - 2026-04-25
+
+### Fixed
+- **Auto-color now also colours pattern clips.** v1.5.1 wrote
+  `ID_PATTERN_COLOR` (event 149) only when an existing colour event was
+  found, but most patterns in real projects have no such event by default.
+  v1.5.2 inserts a new `ID_PATTERN_COLOR` event right after each
+  `ID_PATTERN_NEW` (event 65) for patterns that lack one, so the rainbow
+  hue is applied to all groups regardless of clip type (audio or pattern).
+
+### Technical
+- New `_color_inserts` list in `AnalysisResult`, applied alongside
+  `_name_inserts` in the writer pass that grows the file. The FLdt chunk
+  size is updated to reflect the total inserted bytes.
+- Each inserted event is 5 bytes: `0x95` (ID 149) + 4-byte little-endian
+  DWORD `0x00 BB GG RR`.
+
 ## [1.5.1] - 2026-04-25
 
 ### Fixed
