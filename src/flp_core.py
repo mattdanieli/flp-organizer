@@ -149,6 +149,323 @@ class AnalysisResult:
     _name_inserts: list[tuple[int, bytes]] = field(default_factory=list)
 
 
+# ----- Compatibility validation -----
+
+# Severity levels for compatibility issues. Use the strings directly so they
+# are easy to display in the UI without an enum import.
+SEVERITY_OK      = "ok"
+SEVERITY_WARNING = "warning"
+SEVERITY_ERROR   = "error"
+
+
+@dataclass
+class CompatibilityIssue:
+    """A single problem (or note) found by validate_compatibility()."""
+    severity: str   # "ok", "warning", or "error"
+    code: str       # Stable identifier for the UI to localise the message
+    message: str    # English fallback message
+    details: str = ""   # Optional extra context for "Show details"
+
+
+@dataclass
+class ValidationReport:
+    """Outcome of validating an .flp before processing.
+
+    The report is non-blocking — the GUI decides what to do with it. As a rule
+    of thumb the GUI should refuse to run when there's at least one ERROR-level
+    issue, ask for confirmation on WARNING-level, and proceed silently when
+    everything is OK.
+    """
+    issues: list[CompatibilityIssue] = field(default_factory=list)
+    fl_version: str = ""
+    file_size: int = 0
+    track_data_payload_size: Optional[int] = None
+    arrangement_count: int = 0
+    channel_count: int = 0
+    pattern_count: int = 0
+    track_count: int = 0
+    patterns_without_color: int = 0
+    tracks_without_name: int = 0
+
+    @property
+    def has_errors(self) -> bool:
+        return any(i.severity == SEVERITY_ERROR for i in self.issues)
+
+    @property
+    def has_warnings(self) -> bool:
+        return any(i.severity == SEVERITY_WARNING for i in self.issues)
+
+    @property
+    def overall_severity(self) -> str:
+        if self.has_errors:
+            return SEVERITY_ERROR
+        if self.has_warnings:
+            return SEVERITY_WARNING
+        return SEVERITY_OK
+
+
+# Versions that have been actually tested and confirmed working.
+KNOWN_GOOD_FL_VERSIONS = {
+    "24": "FL Studio 24 (66-byte TRACK_DATA payload)",
+    "25": "FL Studio 25 (70-byte TRACK_DATA payload)",
+}
+
+# TRACK_DATA payload sizes seen in the wild. The writer doesn't care about the
+# exact value (it uses the parsed end position), but unknown sizes deserve a
+# warning because they signal an FL Studio version we haven't tested.
+KNOWN_TRACK_DATA_SIZES = {66, 70}
+
+
+def validate_compatibility(flp_path: Path | str) -> ValidationReport:
+    """Examine an .flp file and report potential compatibility issues.
+
+    Goal: warn the user BEFORE the writer modifies anything so they can
+    decide whether to proceed. The function only reads the file — never
+    writes — so it's always safe to call.
+
+    Returns a ValidationReport whose `issues` list is empty in the happy path.
+    """
+    report = ValidationReport()
+    p = Path(flp_path)
+
+    # 1. File exists & has the right magic bytes
+    if not p.is_file():
+        report.issues.append(CompatibilityIssue(
+            severity=SEVERITY_ERROR,
+            code="file_not_found",
+            message=f"File not found: {p}",
+        ))
+        return report
+
+    try:
+        data = p.read_bytes()
+    except OSError as e:
+        report.issues.append(CompatibilityIssue(
+            severity=SEVERITY_ERROR,
+            code="file_unreadable",
+            message=f"Cannot read file: {e}",
+        ))
+        return report
+
+    report.file_size = len(data)
+
+    if len(data) < 22 or data[:4] != b"FLhd":
+        report.issues.append(CompatibilityIssue(
+            severity=SEVERITY_ERROR,
+            code="not_flp",
+            message="File is not a valid FL Studio .flp project (missing FLhd header).",
+        ))
+        return report
+
+    # 2. Walk the structure to look for obvious anomalies. We do a *minimal*
+    #    parse here, not the full analyze(), because we want to catch problems
+    #    that would crash analyze() too.
+    try:
+        hdr_size = struct.unpack_from("<I", data, 4)[0]
+        fldt_pos = 8 + hdr_size
+        if data[fldt_pos:fldt_pos+4] != b"FLdt":
+            report.issues.append(CompatibilityIssue(
+                severity=SEVERITY_ERROR,
+                code="bad_fldt_marker",
+                message="FLdt chunk marker not found where expected.",
+                details=f"Expected at offset {fldt_pos}, got {data[fldt_pos:fldt_pos+4]!r}",
+            ))
+            return report
+        fldt_size = struct.unpack_from("<I", data, fldt_pos + 4)[0]
+        events_end = fldt_pos + 8 + fldt_size
+
+        if events_end != len(data):
+            # Some FL Studio projects legitimately have trailing bytes after
+            # the FLdt chunk (presets, plugin caches), so this is only a
+            # warning, not an error.
+            extra = len(data) - events_end
+            if extra < 0:
+                report.issues.append(CompatibilityIssue(
+                    severity=SEVERITY_ERROR,
+                    code="fldt_overruns_file",
+                    message="FLdt chunk size exceeds file size (file is truncated).",
+                    details=f"Declared size: {fldt_size}, file ends at: {len(data)}",
+                ))
+                return report
+            else:
+                report.issues.append(CompatibilityIssue(
+                    severity=SEVERITY_WARNING,
+                    code="trailing_bytes",
+                    message=f"File has {extra} bytes of trailing data after FLdt chunk.",
+                    details="This is unusual but should not affect processing.",
+                ))
+
+        # 3. Walk events
+        pos = fldt_pos + 8
+        end = events_end
+        track_data_sizes_seen: set[int] = set()
+        cur_track_idx = -1
+        cur_pat = None
+        cur_arr_count = 0
+        channel_ids: set[int] = set()
+        pattern_ids: set[int] = set()
+        track_count = 0
+        patterns_with_color: set[int] = set()
+        tracks_with_name: set[int] = set()
+        fl_version = ""
+
+        while pos < end:
+            evt_start = pos
+            evt_id = data[pos]; pos += 1
+            if evt_id < 64:
+                payload_start = pos; pos += 1
+            elif evt_id < 128:
+                payload_start = pos; pos += 2
+            elif evt_id < 192:
+                payload_start = pos; pos += 4
+            else:
+                length, shift = 0, 0
+                while True:
+                    if pos >= end:
+                        report.issues.append(CompatibilityIssue(
+                            severity=SEVERITY_ERROR,
+                            code="varint_truncated",
+                            message="Event length varint truncated near end of FLdt chunk.",
+                            details=f"At file offset 0x{evt_start:08x}",
+                        ))
+                        return report
+                    byte = data[pos]; pos += 1
+                    length |= (byte & 0x7f) << shift
+                    if not (byte & 0x80):
+                        break
+                    shift += 7
+                    if shift > 35:
+                        report.issues.append(CompatibilityIssue(
+                            severity=SEVERITY_ERROR,
+                            code="varint_overflow",
+                            message="Malformed event length (varint overflow).",
+                            details=f"At file offset 0x{evt_start:08x}, last_id={evt_id}",
+                        ))
+                        return report
+                payload_start = pos
+                pos += length
+
+            if pos > end:
+                report.issues.append(CompatibilityIssue(
+                    severity=SEVERITY_ERROR,
+                    code="event_overruns",
+                    message=f"Event at offset 0x{evt_start:08x} (id={evt_id}) overruns FLdt boundary.",
+                    details="The file structure is corrupted — probably modified by a tool that "
+                            "didn't update the FLdt size header.",
+                ))
+                return report
+
+            payload_size = pos - payload_start
+
+            # Specific event handling
+            if evt_id == ID_FL_VERSION:
+                # FL version string, e.g. "25.1.6.4997"
+                try:
+                    fl_version = data[payload_start:payload_start+payload_size].rstrip(b"\x00").decode("ascii", errors="replace")
+                except Exception:
+                    pass
+            elif evt_id == ID_CHANNEL_NEW:
+                channel_ids.add(struct.unpack("<H", data[payload_start:payload_start+2])[0])
+            elif evt_id == ID_PATTERN_NEW:
+                cur_pat = struct.unpack("<H", data[payload_start:payload_start+2])[0]
+                pattern_ids.add(cur_pat)
+            elif evt_id == ID_PATTERN_COLOR and cur_pat is not None:
+                patterns_with_color.add(cur_pat)
+            elif evt_id == ID_ARRANGEMENT_NEW:
+                cur_arr_count += 1
+                cur_track_idx = -1
+            elif evt_id == ID_TRACK_DATA:
+                cur_track_idx += 1
+                track_count += 1
+                track_data_sizes_seen.add(payload_size)
+            elif evt_id == ID_TRACK_NAME and cur_track_idx >= 0:
+                tracks_with_name.add(cur_track_idx)
+
+        # Populate report stats
+        report.fl_version = fl_version
+        report.arrangement_count = cur_arr_count
+        report.channel_count = len(channel_ids)
+        report.pattern_count = len(pattern_ids)
+        report.track_count = track_count
+        report.patterns_without_color = len(pattern_ids) - len(patterns_with_color)
+        report.tracks_without_name = track_count - len(tracks_with_name)
+
+        # 4. Build issues from collected stats
+
+        # 4a. Track data payload size
+        if track_data_sizes_seen:
+            sizes_str = ", ".join(str(s) for s in sorted(track_data_sizes_seen))
+            primary = max(track_data_sizes_seen, key=lambda s: 1 if s in KNOWN_TRACK_DATA_SIZES else 0)
+            report.track_data_payload_size = primary
+            unknown_sizes = track_data_sizes_seen - KNOWN_TRACK_DATA_SIZES
+            if unknown_sizes:
+                report.issues.append(CompatibilityIssue(
+                    severity=SEVERITY_WARNING,
+                    code="unknown_track_data_size",
+                    message=f"Unusual TRACK_DATA payload size(s) detected: {sizes_str} bytes.",
+                    details="The tool has been tested with 66-byte (FL 24) and 70-byte (FL 25) "
+                            "payloads. Other sizes might come from a different FL Studio version "
+                            "and the writer hasn't been tested against them. Auto-rename in "
+                            "particular relies on accurate payload boundaries.",
+                ))
+
+        # 4b. FL version
+        if fl_version:
+            major = fl_version.split(".")[0] if "." in fl_version else ""
+            if major and major not in KNOWN_GOOD_FL_VERSIONS:
+                report.issues.append(CompatibilityIssue(
+                    severity=SEVERITY_WARNING,
+                    code="untested_fl_version",
+                    message=f"FL Studio version {fl_version} hasn't been tested by this tool.",
+                    details="Tested versions: FL 24 and FL 25. Other versions may work fine, "
+                            "or may have a different .flp internal layout that the writer "
+                            "doesn't handle correctly. We recommend keeping a backup.",
+                ))
+
+        # 4c. Multiple arrangements
+        if cur_arr_count > 1:
+            report.issues.append(CompatibilityIssue(
+                severity=SEVERITY_WARNING,
+                code="multiple_arrangements",
+                message=f"Project has {cur_arr_count} arrangements.",
+                details="The tool processes each arrangement, but multi-arrangement support "
+                        "has had less testing than single-arrangement projects. Check that all "
+                        "arrangements look correct in the output.",
+            ))
+
+        # 4d. No clips at all
+        if track_count == 0:
+            report.issues.append(CompatibilityIssue(
+                severity=SEVERITY_WARNING,
+                code="no_tracks",
+                message="No playlist tracks found in this project.",
+                details="There's nothing for the tool to reorganize.",
+            ))
+
+        # 4e. Lots of inserts coming
+        if report.patterns_without_color > 200:
+            report.issues.append(CompatibilityIssue(
+                severity=SEVERITY_WARNING,
+                code="many_pattern_inserts",
+                message=f"{report.patterns_without_color} patterns lack a colour event.",
+                details="Auto-color (if enabled) will insert that many new events into the "
+                        "file. This is supported but produces a noticeably larger file. "
+                        "Consider running auto-color only if you really want pattern colors.",
+            ))
+
+    except Exception as e:
+        # Defensive: never let validation itself raise — the user can still
+        # run analyze() at their own risk.
+        report.issues.append(CompatibilityIssue(
+            severity=SEVERITY_ERROR,
+            code="validation_crash",
+            message=f"Validator crashed unexpectedly: {e}",
+            details="The file may have an unusual structure. Proceeding could be risky.",
+        ))
+
+    return report
+
+
 # ----- Low-level parsing helpers -----
 
 def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -518,6 +835,12 @@ def analyze(flp_path: Path | str,
                                  (data[payload_start + TRACK_DATA_COLOR_OFFSET + 1] << 8) |
                                  data[payload_start + TRACK_DATA_COLOR_OFFSET + 2],
                     "override_off": last_43_offset,
+                    # The actual end of this TRACK_DATA's payload — varies by FL
+                    # Studio version (we've seen both 66- and 70-byte payloads).
+                    # Using `pos` here is correct because the parser has just
+                    # advanced `pos` to the byte right after the payload.
+                    "payload_end": pos,
+                    "has_name": False,
                 }
                 track_info_state[cur_track_idx] = info
 
@@ -528,8 +851,17 @@ def analyze(flp_path: Path | str,
             last_43_offset = payload_start
 
         elif evt_id == ID_TRACK_NAME and cur_arr is not None and cur_track_idx >= 0:
-            # track name -- currently not used, but could be useful later
-            pass
+            # Track has a custom name — mark it so auto-rename skips it,
+            # otherwise we'd insert a second TRACK_NAME event causing the
+            # parser (and FL Studio) to misalign.
+            if cur_track_idx in track_info_state:
+                track_info_state[cur_track_idx]["has_name"] = True
+                # Also record the byte range of this TRACK_NAME so the writer
+                # could replace it later (currently we just skip).
+                track_info_state[cur_track_idx]["name_range"] = (
+                    payload_start - 2,  # back up over varint(1B) + id(1B)
+                    pos,
+                )
 
     result.channel_count = len(channels)
     result.pattern_count = len(patterns)
@@ -811,6 +1143,11 @@ def analyze(flp_path: Path | str,
                 dest = dest_track_info.get(track_0)
                 if dest is None:
                     continue
+                # Skip if the track already has a name event — inserting a
+                # second one would corrupt the file structure (FL Studio
+                # parser expects exactly one TRACK_NAME per TRACK_DATA).
+                if info.get("has_name"):
+                    continue
                 # Strip any "coming soon" prefixes like "[muted]"
                 new_name = dest["name"]
                 # Clip to a reasonable length so FL Studio doesn't choke
@@ -831,11 +1168,9 @@ def analyze(flp_path: Path | str,
                         break
                 evt_bytes.extend(name_bytes)
                 # Insert position: right after the TRACK_DATA payload ends.
-                # TRACK_DATA payload ends at mute_off + (70 - 12) = mute_off + 58
-                # But more robustly: the TRACK_DATA payload length is 70, so
-                # end = payload_start + 70.
-                payload_start = info["mute_off"] - TRACK_DATA_MUTE_OFFSET
-                insert_at = payload_start + 70
+                # Use the actual payload size we recorded during parsing —
+                # it's not always 70 bytes (older/newer FL versions vary).
+                insert_at = info["payload_end"]
                 result._name_inserts.append((insert_at, bytes(evt_bytes)))
 
         if base_track_0 > MAX_TRACKS:
