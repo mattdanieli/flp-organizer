@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.5] - 2026-04-26
+
+### Added
+- **Compatibility validator.** Before processing, the tool now scans the
+  .flp file for known risk factors and shows a popup if anything looks
+  off. The validator is read-only — it never modifies the file. It checks:
+  - FL Studio version (tested: FL 24, FL 25)
+  - TRACK_DATA payload size (known: 66 and 70 bytes)
+  - Number of arrangements (less testing on multi-arrangement projects)
+  - Trailing bytes after FLdt chunk
+  - File parsability end-to-end
+  - Outliers in pattern/track counts
+- ERROR-level findings (e.g. file is not a valid .flp, file structure is
+  corrupted) block the Apply button until the user explicitly confirms.
+- WARNING-level findings (untested FL version, unusual TRACK_DATA size,
+  multiple arrangements) show an info dialog and a status banner but do
+  not block.
+- 8 new translation strings for the validator messages, in all 6 languages.
+
+### Changed
+- The CLI and library API expose the validator via `validate_compatibility()`,
+  returning a `ValidationReport` dataclass with `issues: list[CompatibilityIssue]`,
+  `overall_severity` property, and structured stats.
+
+## [1.5.4] - 2026-04-26
+
+### Fixed (critical)
+- **FL Studio crash on auto-rename for FL 24 projects.** The writer
+  hard-coded a 70-byte payload size for `ID_TRACK_DATA` (the size used by
+  FL Studio 25.1.6, which is what reverse-engineering had been done on).
+  FL Studio 24 uses a 66-byte payload. The auto-rename insert position
+  was therefore computed 4 bytes inside an existing event, splitting it
+  in two and corrupting every event that followed. FL Studio crashed
+  when reading the file. The writer now uses the actual parsed payload
+  size for each `ID_TRACK_DATA` (stored as `payload_end` in
+  `track_info_state`).
+- **Auto-rename now skips tracks that already have a custom name.**
+  Previously, on tracks with an existing `ID_TRACK_NAME` (event 239),
+  the tool would insert a *second* event 239 of its own. Two consecutive
+  TRACK_NAME events made the parser misalign and FL Studio crashed.
+  Now the parser sets `has_name = True` for any track that already has
+  a name, and auto-rename skips those.
+
+### Notes
+- This bug affected any project saved by FL Studio 24 or earlier where
+  a track already had a custom name. The 1987.flp test project hit both
+  conditions and crashed FL Studio on opening the organized output.
+
 ## [1.5.3] - 2026-04-25
 
 ### Fixed
