@@ -17,6 +17,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Optional
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -31,7 +32,7 @@ from translations import t, LANGUAGES, DEFAULT_LANG
 
 
 APP_NAME = "FLP Organizer"
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.5"
 AUTHOR = "Matt Danieli"
 PAYPAL_URL = "https://paypal.me/mattdanieli"
 BATCH_LIMIT = 30
@@ -178,6 +179,8 @@ class FlpOrganizerApp:
         self.current_path: Path | None = None   # for single
         self.batch_paths: list[Path] = []       # for batch
         self.current_result: flp_core.AnalysisResult | None = None
+        self.current_validation: flp_core.ValidationReport | None = None
+        self._user_overrode_validation: bool = False
 
         # Tkinter vars
         self.sort_mode_var = tk.StringVar(value="alpha")
@@ -764,6 +767,50 @@ class FlpOrganizerApp:
                   "warn": "StatusWarn.TLabel", "err": "StatusErr.TLabel"}
         self.status_label.configure(text=text, style=styles.get(kind, "Status.TLabel"))
 
+    def _update_compat_banner(self) -> None:
+        """Show compatibility report results in a popup the first time, and
+        keep a status hint visible afterwards. Errors disable Apply&Save until
+        the user explicitly confirms via the popup."""
+        v = self.current_validation
+        if v is None or v.overall_severity == flp_core.SEVERITY_OK:
+            self._user_overrode_validation = False
+            return
+
+        # Build the message body
+        L = self.lang
+        lines = []
+        for issue in v.issues:
+            symbol = "❌" if issue.severity == flp_core.SEVERITY_ERROR else "⚠"
+            lines.append(f"{symbol}  {issue.message}")
+            if issue.details:
+                lines.append(f"     {issue.details}")
+            lines.append("")
+        body = "\n".join(lines).rstrip()
+
+        if v.has_errors:
+            # Errors → show ERROR-level dialog with "Proceed anyway?" choice
+            title = t("compat_errors_title", L)
+            prompt = t("compat_errors_prompt", L)
+            full = f"{prompt}\n\n{body}\n\n{t('compat_errors_question', L)}"
+            answer = messagebox.askyesno(APP_NAME, full, icon="warning")
+            self._user_overrode_validation = bool(answer)
+            if answer:
+                # User chose to proceed — re-enable apply via _on_analyze_done
+                # rerun (it'll see _user_overrode_validation = True)
+                if self.current_result is not None:
+                    has_changes = len(self.current_result._patches) > 0
+                    self.apply_btn.configure(state=("normal" if has_changes else "disabled"))
+                self._set_status(t("compat_proceeding_warning", L), kind="warn")
+            else:
+                self._set_status(t("compat_blocked", L), kind="err")
+        elif v.has_warnings:
+            # Warnings → show INFO-level dialog (one click to dismiss)
+            title = t("compat_warnings_title", L)
+            prompt = t("compat_warnings_prompt", L)
+            messagebox.showinfo(APP_NAME, f"{prompt}\n\n{body}")
+            self._set_status(t("compat_warnings_status", L), kind="warn")
+            self._user_overrode_validation = False
+
     def _open_donation(self) -> None:
         try:
             webbrowser.open(PAYPAL_URL)
@@ -867,6 +914,11 @@ class FlpOrganizerApp:
 
     def _analyze_worker(self, path: Path) -> None:
         try:
+            # Validate compatibility first — read-only, never modifies
+            validation = flp_core.validate_compatibility(path)
+            # Even if validation has errors, we still try to analyze (so the
+            # user sees a preview), but the GUI will refuse Apply&Save until
+            # they confirm.
             result = flp_core.analyze(
                 path, sort_mode=self._current_sort_mode(),
                 sub_sort=self._get_sub_sort(),
@@ -876,7 +928,7 @@ class FlpOrganizerApp:
         except Exception as e:
             self.root.after(0, lambda: self._on_analyze_error(e))
             return
-        self.root.after(0, lambda: self._on_analyze_done(result))
+        self.root.after(0, lambda: self._on_analyze_done(result, validation))
 
     def _on_analyze_error(self, e: Exception) -> None:
         self.info_label.configure(text=t("failed_read", self.lang))
@@ -884,10 +936,15 @@ class FlpOrganizerApp:
         self.current_path = None
         self._refresh_drop_label()
 
-    def _on_analyze_done(self, result: flp_core.AnalysisResult) -> None:
+    def _on_analyze_done(self, result: flp_core.AnalysisResult,
+                         validation: Optional[flp_core.ValidationReport] = None) -> None:
         self.current_result = result
+        self.current_validation = validation
         self.tree.delete(*self.tree.get_children())
         assert self.current_path is not None
+
+        # Update compatibility banner if applicable
+        self._update_compat_banner()
 
         info = (f"{self.current_path.name}    •    FL {result.fl_version}    •    "
                 f"{result.total_clips} clips    •    "
@@ -910,7 +967,15 @@ class FlpOrganizerApp:
             self._set_status(t("ready", self.lang), kind="ok")
 
         has_changes = len(result._patches) > 0
-        self.apply_btn.configure(state=("normal" if has_changes else "disabled"))
+        # Block apply if validation found ERROR-level issues
+        block_for_validation = bool(
+            validation and validation.has_errors
+            and not getattr(self, "_user_overrode_validation", False)
+        )
+        if block_for_validation:
+            self.apply_btn.configure(state="disabled")
+        else:
+            self.apply_btn.configure(state=("normal" if has_changes else "disabled"))
         self.clear_btn.configure(state="normal")
         if not has_changes:
             self._set_status(t("nothing_to_change", self.lang), kind="dim")
